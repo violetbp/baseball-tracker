@@ -338,48 +338,60 @@ void BaseballTracker::draw_final_() {
 // ---------------------------------------------------------------------------
 // Helper: draw base diamond
 // ---------------------------------------------------------------------------
-// Compact diamond layout (7×7 pixels, centered at cx,cy):
+// Enlarged diamond (~14px wide, ~12px tall) so it reads well on 128×32.
+// (cx, cy) is the “fold” between the 2nd-base ray and the 3rd/1st line:
 //
-//        2nd       (cx, cy-3)
-//    3rd   1st     (cx-4,cy+1) (cx+4,cy+1)
+//            2nd
+//         (cx, cy-7)
+//    3rd           1st
+// (cx-7,cy+3)   (cx+7,cy+3)
+//         \   /
+//        home
+//     (cx, cy+5)
 //
-// Each base is drawn as a 2×2 filled square (on) or 1×1 dot (off).
+// Each base pad is 5×5 px (filled = runner on, hollow = empty).
 
 void BaseballTracker::draw_bases_(int cx, int cy) {
   auto *d = display_;
+
+  static constexpr int d2y = -7;   // 2nd base offset (up)
+  static constexpr int d13x = 7;  // 3rd/1st horizontal offset
+  static constexpr int d13y = 3;  // 3rd/1st vertical offset
+  static constexpr int homey = 5;  // home plate offset (down)
+  static constexpr int pad = 2;  // base pad half-size → 5×5 total
 
   struct Base {
     int dx, dy;
     bool occupied;
   } bases[3] = {
-    {  0, -4, state_.runner_second },  // 2nd
-    { -5,  2, state_.runner_third  },  // 3rd
-    {  5,  2, state_.runner_first  },  // 1st
+    { 0, d2y, state_.runner_second },   // 2nd
+    {-d13x, d13y, state_.runner_third}, // 3rd
+    { d13x, d13y, state_.runner_first}, // 1st
   };
 
   for (auto &b : bases) {
     int bx = cx + b.dx;
     int by = cy + b.dy;
     if (b.occupied) {
-      // Filled 3×3 square for occupied base
-      d->filled_rectangle(bx - 1, by - 1, 3, 3, kYellow());
+      d->filled_rectangle(bx - pad, by - pad, 2 * pad + 1, 2 * pad + 1, kYellow());
     } else {
-      // Hollow 3×3 square for empty base
-      d->rectangle(bx - 1, by - 1, 3, 3, kDim());
+      d->rectangle(bx - pad, by - pad, 2 * pad + 1, 2 * pad + 1, kDim());
     }
   }
 
-  // Draw diamond outline connecting the bases with single-pixel lines
-  // Top-left diagonal: 2nd → 3rd
-  d->line(cx, cy - 3, cx - 4, cy + 2, kDim());
-  // Top-right diagonal: 2nd → 1st
-  d->line(cx, cy - 3, cx + 4, cy + 2, kDim());
-  // Bottom line: 3rd → home plate area
-  d->line(cx - 4, cy + 2, cx, cy + 5, kDim());
-  // Bottom line: 1st → home plate area
-  d->line(cx + 4, cy + 2, cx, cy + 5, kDim());
-  // Home plate dot
-  d->draw_pixel_at(cx, cy + 5, kDim());
+  // Connect bases + home
+  int x2 = cx, y2 = cy + d2y;
+  int x3 = cx - d13x, y3 = cy + d13y;
+  int x1 = cx + d13x, y1 = cy + d13y;
+  int xh = cx, yh = cy + homey;
+
+  d->line(x2, y2, x3, y3, kDim());
+  d->line(x2, y2, x1, y1, kDim());
+  d->line(x3, y3, xh, yh, kDim());
+  d->line(x1, y1, xh, yh, kDim());
+
+  // Home: small 3×3 dim square (reads better than a single pixel)
+  d->rectangle(xh - 1, yh - 1, 3, 3, kDim());
 }
 
 // ---------------------------------------------------------------------------

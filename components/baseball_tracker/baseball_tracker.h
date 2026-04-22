@@ -115,7 +115,7 @@ class BaseballTracker : public Component {
   static constexpr int kRow1Y     = 2;   // top row text baseline
   static constexpr int kRow2Y     = 22;  // bottom row text/dots baseline
   static constexpr int kDiamondCX = 64;  // base diamond horizontal center
-  static constexpr int kDiamondCY = 26;  // base diamond vertical center (bottom half)
+  static constexpr int kDiamondCY = 25;  // base diamond “midpoint” (fits enlarged diamond in 32px)
 
   // Dot geometry (outs indicator)
   static constexpr int kDotR    = 3;  // dot radius in pixels
