@@ -239,7 +239,7 @@ void BaseballTracker::draw_game() {
 // ---------------------------------------------------------------------------
 
 void BaseballTracker::draw_no_game_() {
-  draw_centered_text_(0, kDisplayW, 11, "NO GAME TODAY", kDim());
+  draw_centered_text_(0, kDisplayW, kRow2Y, "NO GAME TODAY", kDim());
 }
 
 // ---------------------------------------------------------------------------
@@ -247,21 +247,20 @@ void BaseballTracker::draw_no_game_() {
 // ---------------------------------------------------------------------------
 
 void BaseballTracker::draw_pregame_() {
-  // Top row: "SEA  vs  ATH"
+  // Row 1: "ATH @ SEA" centered
   char top[32];
-  snprintf(top, sizeof(top), "%s vs %s", state_.away_abbrev.c_str(), state_.home_abbrev.c_str());
-  draw_centered_text_(0, kDisplayW, kTopRowY, top, kWhite());
+  snprintf(top, sizeof(top), "%s @ %s", state_.away_abbrev.c_str(), state_.home_abbrev.c_str());
+  draw_centered_text_(0, kDisplayW, kRow1Y, top, kWhite());
 
-  // Bottom row: start time (UTC ISO8601 → strip to "HH:MM UTC")
+  // Row 2: start time (UTC ISO8601 → "HH:MM UTC") centered
   // The API returns e.g. "2026-04-22T20:10:00Z"
   const std::string &dt = state_.start_time_str;
   char time_buf[16] = "TBD";
   if (dt.size() >= 16) {
-    // Extract HH:MM from position 11
     snprintf(time_buf, sizeof(time_buf), "%c%c:%c%c UTC",
              dt[11], dt[12], dt[14], dt[15]);
   }
-  draw_centered_text_(0, kDisplayW, kBotRowY, time_buf, kYellow());
+  draw_centered_text_(0, kDisplayW, kRow2Y, time_buf, kYellow());
 }
 
 // ---------------------------------------------------------------------------
@@ -271,63 +270,42 @@ void BaseballTracker::draw_pregame_() {
 void BaseballTracker::draw_live_() {
   auto *d = display_;
 
-  // ---- Layout regions ----
-  // [0..29]   away team + score
-  // [30..49]  inning indicator
-  // [50..77]  base diamond
-  // [78..127] home team + score
+  // ---- Layout ----
+  // Row 1: [away abbrev + score] ... [^ Bot 3rd] ... [home abbrev + score]
+  // Row 2: [B-S count] ... [base diamond, centered] ... [out dots]
 
-  // --- Away team (left) ---
+  // --- Row 1: away team + score (left) ---
   char away_buf[16];
-  snprintf(away_buf, sizeof(away_buf), "%s", state_.away_abbrev.c_str());
-  d->print(2, kTopRowY, font_, kCyan(), away_buf);
+  snprintf(away_buf, sizeof(away_buf), "%s  %d", state_.away_abbrev.c_str(), state_.away_score);
+  d->print(2, kRow1Y, font_, kCyan(), away_buf);
 
-  char away_score_buf[8];
-  snprintf(away_score_buf, sizeof(away_score_buf), "%d", state_.away_score);
-  d->print(2, kBotRowY, font_, kWhite(), away_score_buf);
-
-  // --- Home team (right) ---
+  // --- Row 1: home team + score (right, right-aligned) ---
   char home_buf[16];
-  snprintf(home_buf, sizeof(home_buf), "%s", state_.home_abbrev.c_str());
-  draw_centered_text_(98, 127, kTopRowY, home_buf, kCyan());
+  snprintf(home_buf, sizeof(home_buf), "%d  %s", state_.home_score, state_.home_abbrev.c_str());
+  draw_centered_text_(78, 126, kRow1Y, home_buf, kCyan());
 
-  char home_score_buf[8];
-  snprintf(home_score_buf, sizeof(home_score_buf), "%d", state_.home_score);
-  draw_centered_text_(98, 127, kBotRowY, home_score_buf, kWhite());
+  // --- Row 1: inning centered between the two scores ---
+  // Format: "^ Bot 3rd" or "v Top 1st"
+  const char *half = state_.is_top_inning ? "^" : "v";
+  const char *side = state_.is_top_inning ? "Top" : "Bot";
+  char inn_buf[16];
+  snprintf(inn_buf, sizeof(inn_buf), "%s %s %s",
+           half, side, state_.inning_ordinal.c_str());
+  draw_centered_text_(38, 90, kRow1Y, inn_buf, kYellow());
 
-  // --- Inning indicator (center-left block: x=30..49) ---
-  // Arrow char + ordinal number stacked
-  const char *arrow = state_.is_top_inning ? "^" : "v";
-  char inn_buf[8];
-  snprintf(inn_buf, sizeof(inn_buf), "%s%d", arrow, state_.inning);
-  draw_centered_text_(30, 50, kTopRowY, inn_buf, kYellow());
+  // --- Row 2: balls-strikes text (left) ---
+  char count_buf[8];
+  snprintf(count_buf, sizeof(count_buf), "%d-%d", state_.balls, state_.strikes);
+  d->print(2, kRow2Y, font_, kWhite(), count_buf);
 
-  // Inning ordinal suffix ("st", "nd", etc.) below the number
-  // Extract suffix from ordinal string (last 2 chars)
-  const std::string &ord = state_.inning_ordinal;
-  if (ord.size() >= 2) {
-    std::string suffix = ord.substr(ord.size() - 2);
-    draw_centered_text_(30, 50, kBotRowY, suffix.c_str(), kYellow());
-  }
+  // --- Row 2: base diamond (center) ---
+  draw_bases_(kDiamondCX, kDiamondCY);
 
-  // --- Base diamond (x=51..77, centered at x=64, y=16) ---
-  draw_bases_(64, 16);
-
-  // --- Count: B / S / O dots (x=78..97) ---
-  // Arrange three groups stacked in the right portion
-  // Balls (4 max) on top row
-  int bx = 78;
-  int by = kTopRowY + 2;
-  d->print(bx, kTopRowY, font_, kDim(), "B");
-  draw_dots_(bx + 7, by, 4, state_.balls, kGreen(), kDim());
-
-  // Strikes (3 max) middle
-  d->print(bx, kBotRowY, font_, kDim(), "S");
-  draw_dots_(bx + 7, kBotRowY + 2, 3, state_.strikes, kYellow(), kDim());
-
-  // Outs (3 max) shown as small red dots beside S row
-  d->print(bx + 24, kBotRowY, font_, kDim(), "O");
-  draw_dots_(bx + 31, kBotRowY + 2, 3, state_.outs, kRed(), kDim());
+  // --- Row 2: outs dots (right) ---
+  // Three dots: red = out recorded, dim = remaining
+  int outs_x = 98;
+  int outs_y = kRow2Y + (kDotR);  // vertically center dots on the text baseline
+  draw_dots_(outs_x, outs_y, 3, state_.outs, kRed(), kDim());
 }
 
 // ---------------------------------------------------------------------------
@@ -335,21 +313,17 @@ void BaseballTracker::draw_live_() {
 // ---------------------------------------------------------------------------
 
 void BaseballTracker::draw_final_() {
-  auto *d = display_;
+  // Row 1: away score (left) ... "FINAL" (center) ... home score (right)
+  char away_buf[12], home_buf[12];
+  snprintf(away_buf, sizeof(away_buf), "%s  %d", state_.away_abbrev.c_str(), state_.away_score);
+  snprintf(home_buf, sizeof(home_buf), "%d  %s", state_.home_score, state_.home_abbrev.c_str());
 
-  // Top row: "ATH 2  FINAL  SEA 5"
-  char left_buf[12], right_buf[12];
-  snprintf(left_buf,  sizeof(left_buf),  "%s %d", state_.away_abbrev.c_str(), state_.away_score);
-  snprintf(right_buf, sizeof(right_buf), "%s %d", state_.home_abbrev.c_str(), state_.home_score);
+  display_->print(2, kRow1Y, font_, kWhite(), away_buf);
+  draw_centered_text_(40, 88, kRow1Y, "FINAL", kYellow());
+  draw_centered_text_(78, 126, kRow1Y, home_buf, kWhite());
 
-  d->print(2, kTopRowY, font_, kWhite(), left_buf);
-  draw_centered_text_(40, 88, kTopRowY, "FINAL", kYellow());
-  draw_centered_text_(90, 127, kTopRowY, right_buf, kWhite());
-
-  // Bottom row: inning total
-  char inn_buf[16];
-  snprintf(inn_buf, sizeof(inn_buf), "%s", state_.inning_ordinal.c_str());
-  draw_centered_text_(0, kDisplayW, kBotRowY, inn_buf, kDim());
+  // Row 2: final inning centered (e.g. "9th" or "10th" for extra innings)
+  draw_centered_text_(0, kDisplayW, kRow2Y, state_.inning_ordinal.c_str(), kDim());
 }
 
 // ---------------------------------------------------------------------------

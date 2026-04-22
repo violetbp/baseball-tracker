@@ -131,12 +131,14 @@
 
   <script>
     // ─── Constants matching baseball_tracker.h ───────────────────────────────
-    const W         = 128;
-    const H         = 32;
-    const kTopRowY  = 1;
-    const kBotRowY  = 18;
-    const kDotR     = 2;
-    const kDotStep  = 6;
+    const W          = 128;
+    const H          = 32;
+    const kRow1Y     = 2;   // top row text baseline
+    const kRow2Y     = 22;  // bottom row text/dots baseline
+    const kDiamondCX = 64;  // base diamond horizontal center
+    const kDiamondCY = 26;  // base diamond vertical center (bottom half)
+    const kDotR      = 2;
+    const kDotStep   = 6;
 
     // Colors matching the C++ helper methods
     const C_WHITE  = '#ffffff';
@@ -151,10 +153,9 @@
     const canvas = document.getElementById('display');
     const ctx    = canvas.getContext('2d');
 
-    // Pixolletta8px is a compact pixel font; Silkscreen is the closest web match
-    // At size 8px on the 128×32 canvas it renders taller than the real device,
-    // so we use 7px which gives a proportional cap-height near the real hardware.
-    const FONT = "7px 'Silkscreen', monospace";
+    // Silkscreen is a pixel font designed for 8px grids.
+    // At exactly 8px the cap-height is 8 LED rows, matching Pixolletta8px size:10.
+    const FONT = "8px 'Silkscreen', monospace";
 
     // ─── Drawing helpers ─────────────────────────────────────────────────────
 
@@ -232,69 +233,61 @@
 
     // ─── Phase draw functions ─────────────────────────────────────────────────
 
+    // Mirrors draw_no_game_()
     function drawNoGame() {
-      drawCentered(0, W, 11, 'NO GAME TODAY', C_DIM);
+      drawCentered(0, W, kRow2Y, 'NO GAME TODAY', C_DIM);
     }
 
+    // Mirrors draw_pregame_()
     function drawPregame(state) {
-      const top = `${state.away_abbrev} vs ${state.home_abbrev}`;
-      drawCentered(0, W, kTopRowY, top, C_WHITE);
+      // Row 1: "ATH @ SEA" centered
+      drawCentered(0, W, kRow1Y, `${state.away_abbrev} @ ${state.home_abbrev}`, C_WHITE);
 
+      // Row 2: "HH:MM UTC" or "TBD" centered
       let timeBuf = 'TBD';
       const dt = state.start_time_str;
       if (dt.length >= 16) {
         timeBuf = `${dt[11]}${dt[12]}:${dt[14]}${dt[15]} UTC`;
       }
-      drawCentered(0, W, kBotRowY, timeBuf, C_YELLOW);
+      drawCentered(0, W, kRow2Y, timeBuf, C_YELLOW);
     }
 
+    // Mirrors draw_live_()
     function drawLive(state) {
-      // ── Away team (left: x 0–29) ──────────────────────────────────────────
-      drawText(2, kTopRowY, state.away_abbrev, C_CYAN);
-      drawText(2, kBotRowY, String(state.away_score), C_WHITE);
+      // ── Row 1: away team + score (left) ──────────────────────────────────
+      // Format: "ATH  3"  (two spaces between abbrev and score)
+      drawText(2, kRow1Y, `${state.away_abbrev}  ${state.away_score}`, C_CYAN);
 
-      // ── Inning indicator (center-left: x 30–50) ───────────────────────────
-      const arrow  = state.is_top_inning ? '^' : 'v';
-      drawCentered(30, 50, kTopRowY, `${arrow}${state.inning}`, C_YELLOW);
+      // ── Row 1: home team + score (right, x 78–126) ───────────────────────
+      // Format: "2  SEA"  (score on left of the pair)
+      drawCentered(78, 126, kRow1Y, `${state.home_score}  ${state.home_abbrev}`, C_CYAN);
 
-      const ord = state.inning_ordinal;
-      if (ord.length >= 2) {
-        drawCentered(30, 50, kBotRowY, ord.slice(-2), C_YELLOW);
-      }
+      // ── Row 1: inning centered between the two scores (x 38–90) ──────────
+      // Format: "^ Top 1st" or "v Bot 4th"
+      const half = state.is_top_inning ? '^' : 'v';
+      const side = state.is_top_inning ? 'Top' : 'Bot';
+      drawCentered(38, 90, kRow1Y, `${half} ${side} ${state.inning_ordinal}`, C_YELLOW);
 
-      // ── Base diamond (x 50–77, center 64,16) ──────────────────────────────
-      drawBases(64, 16, state);
+      // ── Row 2: balls-strikes count text (left) ────────────────────────────
+      drawText(2, kRow2Y, `${state.balls}-${state.strikes}`, C_WHITE);
 
-      // ── Count + Outs (x 78–127, shared with home team) ────────────────────
-      const bx = 78;
-      const by = kTopRowY + 2;  // dot center y for balls/strikes
+      // ── Row 2: base diamond (center: kDiamondCX=64, kDiamondCY=26) ───────
+      drawBases(kDiamondCX, kDiamondCY, state);
 
-      // Balls row (top)
-      drawText(bx, kTopRowY, 'B', C_DIM);
-      drawDots(bx + 7, by, 4, state.balls, C_GREEN, C_DIM);
-
-      // Strikes row (bottom-left of count block)
-      drawText(bx, kBotRowY, 'S', C_DIM);
-      drawDots(bx + 7, kBotRowY + 2, 3, state.strikes, C_YELLOW, C_DIM);
-
-      // Outs row (bottom-right of count block)
-      drawText(bx + 24, kBotRowY, 'O', C_DIM);
-      drawDots(bx + 31, kBotRowY + 2, 3, state.outs, C_RED, C_DIM);
-
-      // ── Home team (right: x 98–127) ───────────────────────────────────────
-      drawCentered(98, 127, kTopRowY, state.home_abbrev, C_CYAN);
-      drawCentered(98, 127, kBotRowY, String(state.home_score), C_WHITE);
+      // ── Row 2: out dots (right, x=98) ────────────────────────────────────
+      // Vertically center dots on the text baseline: y = kRow2Y + kDotR
+      drawDots(98, kRow2Y + kDotR, 3, state.outs, C_RED, C_DIM);
     }
 
+    // Mirrors draw_final_()
     function drawFinal(state) {
-      const leftBuf  = `${state.away_abbrev} ${state.away_score}`;
-      const rightBuf = `${state.home_abbrev} ${state.home_score}`;
+      // Row 1: "ATH  3" | "FINAL" | "2  SEA"
+      drawText(2, kRow1Y, `${state.away_abbrev}  ${state.away_score}`, C_WHITE);
+      drawCentered(40, 88, kRow1Y, 'FINAL', C_YELLOW);
+      drawCentered(78, 126, kRow1Y, `${state.home_score}  ${state.home_abbrev}`, C_WHITE);
 
-      drawText(2, kTopRowY, leftBuf, C_WHITE);
-      drawCentered(40, 88, kTopRowY, 'FINAL', C_YELLOW);
-      drawCentered(90, 127, kTopRowY, rightBuf, C_WHITE);
-
-      drawCentered(0, W, kBotRowY, state.inning_ordinal, C_DIM);
+      // Row 2: final inning ordinal centered (e.g. "9th", "10th")
+      drawCentered(0, W, kRow2Y, state.inning_ordinal, C_DIM);
     }
 
     // ─── Main render ─────────────────────────────────────────────────────────
@@ -386,7 +379,7 @@
         text.textContent =
           `LIVE · ${state.away_abbrev} ${state.away_score} @ ${state.home_abbrev} ${state.home_score}` +
           `  ·  ${half} ${state.inning_ordinal}` +
-          `  ·  ${state.balls}-${state.strikes}, ${state.outs} out`;
+          `  ·  ${state.balls}-${state.strikes} count, ${state.outs} out`;
       } else if (state.phase === 'FINAL') {
         dot.classList.add('final');
         text.textContent =

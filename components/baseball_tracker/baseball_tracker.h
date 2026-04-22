@@ -110,14 +110,16 @@ class BaseballTracker : public Component {
   static Color kDim()    { return Color( 50,  50,  50); }
 
   // Pixel geometry constants for a 128×32 display
-  static constexpr int kDisplayW = 128;
-  static constexpr int kDisplayH = 32;
-  static constexpr int kTopRowY  = 1;   // y baseline for top row text
-  static constexpr int kBotRowY  = 18;  // y baseline for bottom row text/dots
+  static constexpr int kDisplayW  = 128;
+  static constexpr int kDisplayH  = 32;
+  static constexpr int kRow1Y     = 2;   // top row text baseline
+  static constexpr int kRow2Y     = 22;  // bottom row text/dots baseline
+  static constexpr int kDiamondCX = 64;  // base diamond horizontal center
+  static constexpr int kDiamondCY = 26;  // base diamond vertical center (bottom half)
 
-  // Dot geometry
-  static constexpr int kDotR     = 2;   // dot radius in pixels
-  static constexpr int kDotStep  = 6;   // pixel spacing between dot centers
+  // Dot geometry (outs indicator)
+  static constexpr int kDotR    = 2;  // dot radius in pixels
+  static constexpr int kDotStep = 6;  // pixel spacing between dot centers
 };
 
 }  // namespace baseball_tracker
