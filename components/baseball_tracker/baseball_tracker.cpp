@@ -32,18 +32,20 @@ void BaseballTracker::setup() {
 void BaseballTracker::loop() {
   uint32_t now = millis();
 
-  // First poll happens immediately once; subsequent polls respect the interval.
-  // When the game is not live we slow down to 5 minutes to be polite to the API.
   uint32_t effective_interval = poll_interval_ms_;
-  if (state_.phase != GamePhase::LIVE) {
-    effective_interval = 5 * 60 * 1000;  // 5 min when not live
-  }
+  
 
   if (!first_poll_done_ || (now - last_poll_ms_) >= effective_interval) {
     ESP_LOGD(TAG, "Polling MLB API (interval=%u ms, phase=%d)", effective_interval, (int)state_.phase);
     fetch_game_data_();
     last_poll_ms_ = now;
     first_poll_done_ = true;
+  }
+
+  // First poll happens immediately once; subsequent polls respect the interval.
+  // When the game is not live we slow down to 5 minutes to be polite to the API.
+  if (state_.phase != GamePhase::LIVE) {
+    effective_interval = 5 * 60 * 1000;  // 5 min when not live
   }
 }
 
