@@ -1,0 +1,418 @@
+# baseball-tracker.yaml
+#
+# Drop this in alongside (or merge into) the Eastside Urbanism transit-tracker.yaml.
+# It adds a "baseball_score" display page that cycles with the transit schedule.
+#
+# Full transit-tracker.yaml base:
+#   https://github.com/EastsideUrbanism/transit-tracker/blob/main/firmware/transit-tracker.yaml
+#
+# ── What to merge ────────────────────────────────────────────────────────────
+#
+#  1. Add the baseball_tracker external_component entry to external_components:
+#  2. Add the baseball_tracker: block at the top level
+#  3. Add the baseball_score page to your display pages: list
+#
+# Everything below is the complete merged firmware for reference.
+# ─────────────────────────────────────────────────────────────────────────────
+
+substitutions:
+  name: "transit-tracker"
+  friendly_name: "Transit Tracker"
+  project_version: "dev"
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  name_add_mac_suffix: true
+  min_version: 2026.3.0
+  project:
+    name: "Eastside Urbanism.Transit Tracker"
+    version: ${project_version}
+
+dashboard_import:
+  package_import_url: github://EastsideUrbanism/transit-tracker/firmware/transit-tracker.yaml@${project_version}
+
+esp32:
+  variant: esp32s3
+  flash_size: 8MB
+  cpu_frequency: 240MHz
+  framework:
+    type: arduino
+
+psram:
+  mode: quad
+  speed: 80MHz
+
+external_components:
+  - source: github://pr#13921
+    components: [ hub75 ]
+    refresh: 1h
+  - source: github://tjhorner/esphome-custom-components@157c1c216ab296fd2cecc197728f9cbb909344d3
+    components: [ serial_rpc, lis3dh, project_version ]
+  - source: github://tjhorner/esphome-transit-tracker@main
+    refresh: 0s
+  # ── ADD THIS ──────────────────────────────────────────────────────────────
+  - source: github://vboysepe/esphome-baseball-tracker@main
+    refresh: 0s
+  # ──────────────────────────────────────────────────────────────────────────
+
+logger:
+  level: DEBUG
+
+wifi:
+  power_save_mode: none
+  ap:
+    password: "hunter2hunter2"
+
+captive_portal:
+
+api:
+  reboot_timeout: 0s
+
+http_request:
+  verify_ssl: false
+
+ota:
+  - platform: http_request
+  - platform: esphome
+    password: ""
+
+update:
+  - platform: http_request
+    name: Firmware Update
+    source: https://transit-tracker.eastsideurbanism.org/firmware/manifest.json
+
+# ── ADD THIS ─────────────────────────────────────────────────────────────────
+baseball_tracker:
+  id: baseball
+  # team_id 136 = Seattle Mariners (default; you can omit this line)
+  team_id: 136
+  # poll_interval controls how often the live game data refreshes.
+  # Falls back to 5 min automatically when no game is in progress.
+  poll_interval: 30s
+  # font_id and display_id default to the first declared font/display in your
+  # config — set them explicitly if you have more than one.
+# ─────────────────────────────────────────────────────────────────────────────
+
+switch:
+  - platform: template
+    id: flip_display_config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    turn_on_action:
+      - lambda: |-
+          id(matrix).set_rotation(esphome::display::DisplayRotation::DISPLAY_ROTATION_180_DEGREES);
+    turn_off_action:
+      - lambda: |-
+          id(matrix).set_rotation(esphome::display::DisplayRotation::DISPLAY_ROTATION_0_DEGREES);
+  - platform: template
+    id: scroll_headsigns_config
+    name: "Scroll Headsigns"
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    turn_on_action:
+      - lambda: id(tracker).set_scroll_headsigns(true);
+    turn_off_action:
+      - lambda: id(tracker).set_scroll_headsigns(false);
+
+button:
+  - platform: restart
+    name: "Restart"
+  - platform: template
+    id: reload_tracker
+    on_press:
+      - lambda: |-
+          id(tracker).reconnect();
+  - platform: template
+    id: write_preferences
+    on_press:
+      - lambda: |-
+          global_preferences->sync();
+
+text:
+  - &config_text_common
+    platform: template
+    id: base_url_config
+    mode: text
+    optimistic: true
+    restore_value: true
+    on_value:
+      then:
+        lambda: |
+          id(tracker).set_base_url(id(base_url_config)->state);
+  - <<: *config_text_common
+    id: feed_code_config
+    on_value:
+      then:
+        lambda: |
+          id(tracker).set_feed_code(id(feed_code_config)->state);
+  - <<: *config_text_common
+    id: schedule_config
+    on_value:
+      then:
+        lambda: |
+          id(tracker).set_schedule_string(id(schedule_config)->state);
+  - <<: *config_text_common
+    id: abbreviations_config
+    on_value:
+      then:
+        lambda: |
+          id(tracker).set_abbreviations_from_text(id(abbreviations_config)->state);
+  - <<: *config_text_common
+    id: route_styles_config
+    on_value:
+      then:
+        lambda: |
+          id(tracker).set_route_styles_from_text(id(route_styles_config)->state);
+  - <<: *config_text_common
+    id: now_str_config
+    initial_value: "Now"
+    on_value:
+      then:
+        lambda: |-
+          id(tracker).get_localization()->set_now_string(id(now_str_config)->state);
+  - <<: *config_text_common
+    id: min_long_str_config
+    initial_value: "min"
+    on_value:
+      then:
+        lambda: |-
+          id(tracker).get_localization()->set_minutes_long_string(id(min_long_str_config)->state);
+  - <<: *config_text_common
+    id: min_short_str_config
+    initial_value: "m"
+    on_value:
+      then:
+        lambda: |-
+          id(tracker).get_localization()->set_minutes_short_string(id(min_short_str_config)->state);
+  - <<: *config_text_common
+    id: hours_short_str_config
+    initial_value: "h"
+    on_value:
+      then:
+        lambda: |-
+          id(tracker).get_localization()->set_hours_short_string(id(hours_short_str_config)->state);
+
+select:
+  - platform: template
+    id: time_display_config
+    optimistic: true
+    restore_value: true
+    options:
+      - "departure"
+      - "arrival"
+    on_value:
+      then:
+        lambda: |-
+          id(tracker).set_display_departure_times(id(time_display_config)->current_option() == "departure");
+  - platform: template
+    id: time_units_config
+    optimistic: true
+    restore_value: true
+    options:
+      - "long"
+      - "short"
+      - "none"
+    on_value:
+      then:
+        lambda: |-
+          transit_tracker::UnitDisplay unit_display;
+          if (id(time_units_config)->current_option() == "long") {
+            unit_display = transit_tracker::UnitDisplay::UNIT_DISPLAY_LONG;
+          } else if (id(time_units_config)->current_option() == "short") {
+            unit_display = transit_tracker::UnitDisplay::UNIT_DISPLAY_SHORT;
+          } else {
+            unit_display = transit_tracker::UnitDisplay::UNIT_DISPLAY_NONE;
+          }
+
+          id(tracker).set_unit_display(unit_display);
+  - platform: template
+    id: list_mode_config
+    optimistic: true
+    restore_value: true
+    options:
+      - "sequential"
+      - "nextPerRoute"
+    on_value:
+      then:
+        lambda: |-
+          id(tracker).set_list_mode(id(list_mode_config)->current_option());
+
+output:
+  - platform: template
+    id: display_brightness_output
+    type: float
+    min_power: 0.004 # 1/255
+    zero_means_zero: true
+    write_action:
+      - hub75.set_brightness:
+          id: matrix
+          brightness: !lambda return state * 255.0;
+
+light:
+  - platform: monochromatic
+    name: Display Brightness
+    id: display_brightness
+    output: display_brightness_output
+    restore_mode: RESTORE_DEFAULT_ON
+
+status_led:
+  pin:
+    number: GPIO13
+
+script:
+  - id: dim_display
+    parameters:
+      up: bool
+    then:
+      - light.dim_relative:
+          id: display_brightness
+          relative_brightness: !lambda "return up ? 0.2 : -0.2;"
+          transition_length: 0.1s
+
+binary_sensor:
+  - platform: template
+    id: both_buttons
+    lambda: |-
+      return id(up_button).state && id(down_button).state;
+    on_press:
+      then:
+        - display.page.show_next: matrix
+  - platform: gpio
+    id: up_button
+    pin: &button_pin_cfg
+      number: GPIO6
+      inverted: true
+      mode:
+        input: true
+        pullup: true
+    filters: &button_filters
+      - autorepeat:
+        - delay: 500ms
+          time_off: 300ms
+          time_on: 100ms
+    on_press:
+      then:
+        - script.execute:
+            id: dim_display
+            up: !lambda "return !id(flip_display_config).state;"
+  - platform: gpio
+    id: down_button
+    pin:
+      <<: *button_pin_cfg
+      number: GPIO7
+    filters: *button_filters
+    on_press:
+      then:
+        - script.execute:
+            id: dim_display
+            up: !lambda "return id(flip_display_config).state;"
+
+i2c:
+  sda: GPIO16
+  scl: GPIO17
+
+lis3dh:
+  range: 2G
+  data_rate: 1HZ
+  resolution: HIGH_RES
+  address: 0x19
+  update_interval: 1s
+
+debug:
+
+text_sensor:
+  - platform: debug
+    device:
+      name: "Device Info"
+    reset_reason:
+      name: "Reset Reason"
+  - platform: project_version
+    id: project_version_text
+  - platform: lis3dh
+    orientation_xy:
+      id: orientation_sensor
+      on_value:
+        then:
+          - if:
+              condition:
+                lambda: |-
+                  return x == "Portrait Upside Down";
+              then:
+                - switch.turn_on: flip_display_config
+          - if:
+              condition:
+                lambda: |-
+                  return x == "Portrait Upright";
+              then:
+                - switch.turn_off: flip_display_config
+
+sensor:
+  - platform: uptime
+    type: timestamp
+    name: Uptime
+  - platform: wifi_signal
+    name: "Wi-Fi Signal"
+    update_interval: 60s
+    entity_category: "diagnostic"
+
+display:
+  - platform: hub75
+    id: matrix
+    board: adafruit-matrix-portal-s3
+    double_buffer: true
+    update_interval: 32ms
+    clock_speed: 16MHz
+    panel_width: 64
+    panel_height: 32
+    layout_cols: 2
+    g1_pin: 40
+    b1_pin: 41
+    g2_pin: 37
+    b2_pin: 39
+    e_pin: 21
+    brightness: 255
+    pages:
+      - id: transit_schedule
+        lambda: |-
+          id(tracker).draw_schedule();
+      # ── ADD THIS PAGE ──────────────────────────────────────────────────────
+      - id: baseball_score
+        lambda: |-
+          id(baseball).draw_game();
+      # ──────────────────────────────────────────────────────────────────────
+      - id: ip_address_page
+        lambda: |-
+          int x = it.get_width() / 2;
+          int y = it.get_height() / 2;
+
+          auto ip_addresses = ::esphome::network::get_ip_addresses();
+          if (ip_addresses.empty()) {
+            it.printf(x, y, id(pixolletta), COLOR_ON, TextAlign::CENTER, "No IP Address");
+            return;
+          }
+
+          char ip_address[esphome::network::IP_ADDRESS_BUFFER_SIZE];
+          ip_addresses[0].str_to(ip_address);
+          it.printf(x, y, id(pixolletta), COLOR_ON, TextAlign::CENTER, "%s", ip_address);
+
+font:
+  - file: "fonts/Pixolletta8px.ttf"
+    id: pixolletta
+    size: 10
+    glyphs:
+      - abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,:;!?()"'-+/*=%@#[]{}<>|&^~
+      - ÄËÏÖÜÉÈÔäëïöüéèôŊŋÁÊÎÛÝáêîûýĜĝÀÌÒàìòÑñÍÓÚíóúÇçĆČĐŠŽćčđšžÙùÕõŞŁŇŘşłňřÅåØøĀĒĪŌŪāēīōūÂâĞğıĎĚŤŮďěťůÆæĲĳŒœÐðŸÿßŐŰőűÞþÃãĂĔĬŎŬăĕĭŏŭĨŨĩũĄĘŃŚŻąęńśżĖėĢĶĻŅģķļņĮŲįųŔŹŕźĊĠċġħŜŝŢţŦŧŴŵŶŷĹĽĺľİ
+      - " "
+
+time:
+  - platform: sntp
+    id: sntp_time
+    timezone: America/Los_Angeles
+
+web_server:
+
+transit_tracker:
+  id: tracker
+
+serial_rpc:
