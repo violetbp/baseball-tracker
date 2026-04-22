@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Baseball Tracker — Live Display Preview</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Silkscreen:wght@400;700&display=swap" rel="stylesheet">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #0d0d0d;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      font-family: 'Silkscreen', monospace;
+      color: #555;
+      gap: 20px;
+      padding: 24px;
+    }
+
+    h1 {
+      font-size: 11px;
+      letter-spacing: 3px;
+      color: #444;
+      text-transform: uppercase;
+    }
+
+    /* The outer housing of the LED panel */
+    .panel-housing {
+      background: #111;
+      border: 2px solid #1a1a1a;
+      border-radius: 6px;
+      padding: 10px 14px;
+      box-shadow: 0 0 40px rgba(0,0,0,0.9), inset 0 1px 0 #222;
+    }
+
+    .panel-label {
+      font-size: 7px;
+      letter-spacing: 2px;
+      color: #2a2a2a;
+      text-align: center;
+      margin-bottom: 8px;
+      text-transform: uppercase;
+    }
+
+    /* Canvas wrapper for the LED glow effect */
+    .canvas-wrapper {
+      position: relative;
+      border: 1px solid #0a0a0a;
+      border-radius: 2px;
+      overflow: hidden;
+    }
+
+    /* Main display canvas — 128×32 scaled up 6× */
+    #display {
+      display: block;
+      image-rendering: pixelated;
+      image-rendering: crisp-edges;
+      width: 768px;
+      height: 192px;
+    }
+
+    /* LED grid overlay — creates the dot-matrix look */
+    .led-grid {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      background-image:
+        linear-gradient(rgba(0,0,0,0.35) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(0,0,0,0.35) 1px, transparent 1px);
+      background-size: 6px 6px;
+    }
+
+    /* Subtle scan-line vignette */
+    .vignette {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      background: radial-gradient(ellipse at center,
+        transparent 60%,
+        rgba(0,0,0,0.55) 100%);
+    }
+
+    .info-row {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      font-size: 9px;
+      letter-spacing: 1px;
+      color: #3a3a3a;
+    }
+
+    .status-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: #333;
+      flex-shrink: 0;
+      transition: background 0.4s;
+    }
+    .status-dot.live { background: #00ff00; box-shadow: 0 0 6px #00ff00; }
+    .status-dot.final { background: #ffff00; }
+    .status-dot.preview { background: #00aaff; }
+
+    #status-text { color: #444; }
+    #refresh-timer { color: #333; }
+  </style>
+</head>
+<body>
+
+  <h1>Baseball Tracker — 128 × 32 LED Panel</h1>
+
+  <div class="panel-housing">
+    <div class="panel-label">Adafruit Matrix Portal S3 · HUB75 · 2× 64×32</div>
+    <div class="canvas-wrapper">
+      <canvas id="display" width="128" height="32"></canvas>
+      <div class="led-grid"></div>
+      <div class="vignette"></div>
+    </div>
+  </div>
+
+  <div class="info-row">
+    <div class="status-dot" id="status-dot"></div>
+    <span id="status-text">Fetching…</span>
+    <span id="refresh-timer"></span>
+  </div>
+
+  <script>
+    // ─── Constants matching baseball_tracker.h ───────────────────────────────
+    const W         = 128;
+    const H         = 32;
+    const kTopRowY  = 1;
+    const kBotRowY  = 18;
+    const kDotR     = 2;
+    const kDotStep  = 6;
+
+    // Colors matching the C++ helper methods
+    const C_WHITE  = '#ffffff';
+    const C_YELLOW = '#ffff00';
+    const C_GREEN  = '#00ff00';
+    const C_RED    = '#ff4444';
+    const C_CYAN   = '#00ffff';
+    const C_DIM    = '#404040';
+    const C_BG     = '#050505';
+
+    // ─── Canvas setup ────────────────────────────────────────────────────────
+    const canvas = document.getElementById('display');
+    const ctx    = canvas.getContext('2d');
+
+    // Pixolletta8px is a compact pixel font; Silkscreen is the closest web match
+    // At size 8px on the 128×32 canvas it renders taller than the real device,
+    // so we use 7px which gives a proportional cap-height near the real hardware.
+    const FONT = "7px 'Silkscreen', monospace";
+
+    // ─── Drawing helpers ─────────────────────────────────────────────────────
+
+    function textWidth(text) {
+      ctx.font = FONT;
+      return ctx.measureText(text).width;
+    }
+
+    function drawText(x, y, text, color) {
+      ctx.font = FONT;
+      ctx.textBaseline = 'top';
+      ctx.fillStyle = color;
+      ctx.fillText(text, x, y);
+    }
+
+    // Mirrors draw_centered_text_(x_start, x_end, y, text, color)
+    function drawCentered(xStart, xEnd, y, text, color) {
+      const w = textWidth(text);
+      const x = Math.round((xStart + xEnd) / 2 - w / 2);
+      drawText(x, y, text, color);
+    }
+
+    // Mirrors draw_dots_(x, y, count, filled, on_color, off_color)
+    function drawDots(x, y, count, filled, onColor, offColor) {
+      for (let i = 0; i < count; i++) {
+        const cx = x + i * kDotStep;
+        ctx.beginPath();
+        ctx.arc(cx, y, kDotR, 0, Math.PI * 2);
+        if (i < filled) {
+          ctx.fillStyle = onColor;
+          ctx.fill();
+        } else {
+          ctx.strokeStyle = offColor;
+          ctx.lineWidth = 0.75;
+          ctx.stroke();
+        }
+      }
+    }
+
+    // Mirrors draw_bases_(cx, cy)
+    function drawBases(cx, cy, state) {
+      const bases = [
+        { dx:  0, dy: -4, occupied: state.runner_second }, // 2nd
+        { dx: -5, dy:  2, occupied: state.runner_third  }, // 3rd
+        { dx:  5, dy:  2, occupied: state.runner_first  }, // 1st
+      ];
+
+      for (const b of bases) {
+        const bx = cx + b.dx;
+        const by = cy + b.dy;
+        if (b.occupied) {
+          ctx.fillStyle = C_YELLOW;
+          ctx.fillRect(bx - 1, by - 1, 3, 3);
+        } else {
+          ctx.strokeStyle = C_DIM;
+          ctx.lineWidth = 0.75;
+          ctx.strokeRect(bx - 0.5, by - 0.5, 3, 3);
+        }
+      }
+
+      // Diamond connecting lines
+      ctx.strokeStyle = C_DIM;
+      ctx.lineWidth = 0.75;
+      ctx.beginPath();
+      ctx.moveTo(cx,     cy - 3); ctx.lineTo(cx - 4, cy + 2); // 2nd→3rd
+      ctx.moveTo(cx,     cy - 3); ctx.lineTo(cx + 4, cy + 2); // 2nd→1st
+      ctx.moveTo(cx - 4, cy + 2); ctx.lineTo(cx,     cy + 5); // 3rd→home
+      ctx.moveTo(cx + 4, cy + 2); ctx.lineTo(cx,     cy + 5); // 1st→home
+      ctx.stroke();
+
+      // Home plate dot
+      ctx.fillStyle = C_DIM;
+      ctx.fillRect(cx, cy + 5, 1, 1);
+    }
+
+    // ─── Phase draw functions ─────────────────────────────────────────────────
+
+    function drawNoGame() {
+      drawCentered(0, W, 11, 'NO GAME TODAY', C_DIM);
+    }
+
+    function drawPregame(state) {
+      const top = `${state.away_abbrev} vs ${state.home_abbrev}`;
+      drawCentered(0, W, kTopRowY, top, C_WHITE);
+
+      let timeBuf = 'TBD';
+      const dt = state.start_time_str;
+      if (dt.length >= 16) {
+        timeBuf = `${dt[11]}${dt[12]}:${dt[14]}${dt[15]} UTC`;
+      }
+      drawCentered(0, W, kBotRowY, timeBuf, C_YELLOW);
+    }
+
+    function drawLive(state) {
+      // ── Away team (left: x 0–29) ──────────────────────────────────────────
+      drawText(2, kTopRowY, state.away_abbrev, C_CYAN);
+      drawText(2, kBotRowY, String(state.away_score), C_WHITE);
+
+      // ── Inning indicator (center-left: x 30–50) ───────────────────────────
+      const arrow  = state.is_top_inning ? '^' : 'v';
+      drawCentered(30, 50, kTopRowY, `${arrow}${state.inning}`, C_YELLOW);
+
+      const ord = state.inning_ordinal;
+      if (ord.length >= 2) {
+        drawCentered(30, 50, kBotRowY, ord.slice(-2), C_YELLOW);
+      }
+
+      // ── Base diamond (x 50–77, center 64,16) ──────────────────────────────
+      drawBases(64, 16, state);
+
+      // ── Count + Outs (x 78–127, shared with home team) ────────────────────
+      const bx = 78;
+      const by = kTopRowY + 2;  // dot center y for balls/strikes
+
+      // Balls row (top)
+      drawText(bx, kTopRowY, 'B', C_DIM);
+      drawDots(bx + 7, by, 4, state.balls, C_GREEN, C_DIM);
+
+      // Strikes row (bottom-left of count block)
+      drawText(bx, kBotRowY, 'S', C_DIM);
+      drawDots(bx + 7, kBotRowY + 2, 3, state.strikes, C_YELLOW, C_DIM);
+
+      // Outs row (bottom-right of count block)
+      drawText(bx + 24, kBotRowY, 'O', C_DIM);
+      drawDots(bx + 31, kBotRowY + 2, 3, state.outs, C_RED, C_DIM);
+
+      // ── Home team (right: x 98–127) ───────────────────────────────────────
+      drawCentered(98, 127, kTopRowY, state.home_abbrev, C_CYAN);
+      drawCentered(98, 127, kBotRowY, String(state.home_score), C_WHITE);
+    }
+
+    function drawFinal(state) {
+      const leftBuf  = `${state.away_abbrev} ${state.away_score}`;
+      const rightBuf = `${state.home_abbrev} ${state.home_score}`;
+
+      drawText(2, kTopRowY, leftBuf, C_WHITE);
+      drawCentered(40, 88, kTopRowY, 'FINAL', C_YELLOW);
+      drawCentered(90, 127, kTopRowY, rightBuf, C_WHITE);
+
+      drawCentered(0, W, kBotRowY, state.inning_ordinal, C_DIM);
+    }
+
+    // ─── Main render ─────────────────────────────────────────────────────────
+
+    function render(state) {
+      ctx.fillStyle = C_BG;
+      ctx.fillRect(0, 0, W, H);
+
+      if (!state) {
+        drawCentered(0, W, 13, 'LOADING', C_DIM);
+        return;
+      }
+
+      switch (state.phase) {
+        case 'NONE':    drawNoGame();        break;
+        case 'PREVIEW': drawPregame(state);  break;
+        case 'LIVE':    drawLive(state);     break;
+        case 'FINAL':   drawFinal(state);    break;
+      }
+    }
+
+    // ─── API parsing ─────────────────────────────────────────────────────────
+
+    function parseResponse(data) {
+      const s = {
+        phase: 'NONE',
+        away_abbrev: '???', home_abbrev: '???',
+        away_score: 0, home_score: 0,
+        inning: 0, inning_ordinal: '', is_top_inning: true,
+        balls: 0, strikes: 0, outs: 0,
+        runner_first: false, runner_second: false, runner_third: false,
+        start_time_str: '', game_pk: 0,
+      };
+
+      if (!data.totalGames || data.totalGames === 0) return s;
+
+      const dates = data.dates;
+      if (!dates || !dates.length) return s;
+
+      const game = dates[0]?.games?.[0];
+      if (!game) return s;
+
+      s.game_pk = game.gamePk || 0;
+
+      const abs = game.status?.abstractGameState || 'Preview';
+      if      (abs === 'Live')  s.phase = 'LIVE';
+      else if (abs === 'Final') s.phase = 'FINAL';
+      else                      s.phase = 'PREVIEW';
+
+      s.away_abbrev = game.teams?.away?.team?.abbreviation || '???';
+      s.home_abbrev = game.teams?.home?.team?.abbreviation || '???';
+      s.away_score  = game.teams?.away?.score ?? 0;
+      s.home_score  = game.teams?.home?.score ?? 0;
+
+      if (s.phase === 'PREVIEW') {
+        s.start_time_str = game.gameDate || '';
+      }
+
+      const ls = game.linescore;
+      if (ls) {
+        s.inning         = ls.currentInning        || 0;
+        s.inning_ordinal = ls.currentInningOrdinal  || '';
+        s.is_top_inning  = ls.isTopInning           ?? true;
+        s.balls          = ls.balls                 || 0;
+        s.strikes        = ls.strikes               || 0;
+        s.outs           = ls.outs                  || 0;
+
+        const off = ls.offense;
+        if (off) {
+          s.runner_first  = off.first  != null;
+          s.runner_second = off.second != null;
+          s.runner_third  = off.third  != null;
+        }
+      }
+
+      return s;
+    }
+
+    // ─── Status UI ───────────────────────────────────────────────────────────
+
+    function updateStatus(state, fetchedAt) {
+      const dot  = document.getElementById('status-dot');
+      const text = document.getElementById('status-text');
+
+      dot.className = 'status-dot';
+      if (state.phase === 'LIVE') {
+        dot.classList.add('live');
+        const half = state.is_top_inning ? 'Top' : 'Bot';
+        text.textContent =
+          `LIVE · ${state.away_abbrev} ${state.away_score} @ ${state.home_abbrev} ${state.home_score}` +
+          `  ·  ${half} ${state.inning_ordinal}` +
+          `  ·  ${state.balls}-${state.strikes}, ${state.outs} out`;
+      } else if (state.phase === 'FINAL') {
+        dot.classList.add('final');
+        text.textContent =
+          `Final · ${state.away_abbrev} ${state.away_score} @ ${state.home_abbrev} ${state.home_score}`;
+      } else if (state.phase === 'PREVIEW') {
+        dot.classList.add('preview');
+        const dt = state.start_time_str;
+        const time = dt.length >= 16 ? `${dt[11]}${dt[12]}:${dt[14]}${dt[15]} UTC` : '';
+        text.textContent =
+          `Scheduled · ${state.away_abbrev} @ ${state.home_abbrev}  ·  ${time}`;
+      } else {
+        text.textContent = 'No game today';
+      }
+
+      document.getElementById('refresh-timer').textContent =
+        `Updated ${fetchedAt.toLocaleTimeString()}`;
+    }
+
+    // ─── Fetch loop ───────────────────────────────────────────────────────────
+
+    const API =
+      'https://statsapi.mlb.com/api/v1/schedule?sportId=1&teamId=136&hydrate=linescore,team';
+
+    let currentState = null;
+
+    async function fetchAndRender() {
+      try {
+        const resp = await fetch(API);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data  = await resp.json();
+        currentState = parseResponse(data);
+        render(currentState);
+        updateStatus(currentState, new Date());
+      } catch (e) {
+        document.getElementById('status-text').textContent = `Fetch error: ${e.message}`;
+        // Keep showing last good state if we have one
+        if (currentState) render(currentState);
+      }
+    }
+
+    // Initial render (shows loading)
+    render(null);
+
+    // Fonts may not be loaded yet — wait, then fetch
+    document.fonts.ready.then(() => {
+      fetchAndRender();
+      // Poll every 30 s when live, 5 min otherwise
+      // We just poll every 30 s here and let the API return the latest
+      setInterval(fetchAndRender, 30_000);
+    });
+  </script>
+</body>
+</html>

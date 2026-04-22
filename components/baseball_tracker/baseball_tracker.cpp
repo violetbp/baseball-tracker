@@ -25,6 +25,8 @@ static const char *const MLB_SCHEDULE_PATH =
 
 void BaseballTracker::setup() {
   ESP_LOGCONFIG(TAG, "Setting up Baseball Tracker (team_id=%d)", team_id_);
+  fetch_game_data_();
+
 }
 
 void BaseballTracker::loop() {
