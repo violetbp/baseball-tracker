@@ -114,6 +114,18 @@ switch:
       - lambda: id(tracker).set_scroll_headsigns(true);
     turn_off_action:
       - lambda: id(tracker).set_scroll_headsigns(false);
+  # ── ADD THIS ──────────────────────────────────────────────────────────────
+  - platform: template
+    id: baseball_display_switch
+    name: "Baseball Score Display"
+    icon: "mdi:baseball"
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    turn_on_action:
+      - display.page.show: baseball_score
+    turn_off_action:
+      - display.page.show: transit_schedule
+  # ──────────────────────────────────────────────────────────────────────────
 
 button:
   - platform: restart
@@ -278,6 +290,8 @@ binary_sensor:
     on_press:
       then:
         - display.page.show_next: matrix
+        # Keep the HA switch in sync when the user manually cycles pages
+        - switch.turn_off: baseball_display_switch
   - platform: gpio
     id: up_button
     pin: &button_pin_cfg

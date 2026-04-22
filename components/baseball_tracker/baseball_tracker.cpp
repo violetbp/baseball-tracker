@@ -38,6 +38,7 @@ void BaseballTracker::loop() {
   }
 
   if (!first_poll_done_ || (now - last_poll_ms_) >= effective_interval) {
+    ESP_LOGD(TAG, "Polling MLB API (interval=%u ms, phase=%d)", effective_interval, (int)state_.phase);
     fetch_game_data_();
     last_poll_ms_ = now;
     first_poll_done_ = true;
@@ -58,6 +59,9 @@ void BaseballTracker::fetch_game_data_() {
   char path[128];
   snprintf(path, sizeof(path), MLB_SCHEDULE_PATH, team_id_);
 
+  ESP_LOGD(TAG, "GET https://%s%s", MLB_API_HOST, path);
+  uint32_t t0 = millis();
+
   WiFiClientSecure client;
   client.setInsecure();  // matches verify_ssl: false in the firmware
 
@@ -67,8 +71,10 @@ void BaseballTracker::fetch_game_data_() {
   http.addHeader("User-Agent", "ESPHome-BaseballTracker/1.0");
 
   int code = http.GET();
+  uint32_t elapsed = millis() - t0;
+
   if (code != 200) {
-    ESP_LOGW(TAG, "HTTP GET failed: %d", code);
+    ESP_LOGW(TAG, "HTTP GET failed after %u ms: code=%d", elapsed, code);
     http.end();
     return;
   }
@@ -76,8 +82,10 @@ void BaseballTracker::fetch_game_data_() {
   std::string body = http.getString().c_str();
   http.end();
 
+  ESP_LOGD(TAG, "HTTP 200 in %u ms, body=%u bytes", elapsed, (unsigned)body.size());
+
   if (!parse_response_(body)) {
-    ESP_LOGW(TAG, "Failed to parse MLB API response");
+    ESP_LOGW(TAG, "Failed to parse MLB API response (body_len=%u)", (unsigned)body.size());
   }
 }
 
@@ -86,19 +94,25 @@ void BaseballTracker::fetch_game_data_() {
 // ---------------------------------------------------------------------------
 
 bool BaseballTracker::parse_response_(const std::string &json_body) {
-  return json::parse_json(json_body, [this](JsonObject root) -> bool {
-    // Reset to a clean state each parse cycle
+  // Snapshot current state so we can log only what changed
+  GameState prev = state_;
+
+  return json::parse_json(json_body, [this, &prev](JsonObject root) -> bool {
     state_ = GameState{};
 
     int total_games = root["totalGames"] | 0;
     if (total_games == 0) {
       state_.phase = GamePhase::NONE;
+      if (prev.phase != GamePhase::NONE) {
+        ESP_LOGI(TAG, "No game scheduled today");
+      }
       return true;
     }
 
     JsonArray dates = root["dates"];
     if (dates.isNull() || dates.size() == 0) {
       state_.phase = GamePhase::NONE;
+      ESP_LOGW(TAG, "totalGames=%d but dates array is empty", total_games);
       return true;
     }
 
@@ -106,6 +120,7 @@ bool BaseballTracker::parse_response_(const std::string &json_body) {
     JsonObject game = dates[0]["games"][0];
     if (game.isNull()) {
       state_.phase = GamePhase::NONE;
+      ESP_LOGW(TAG, "Games array unexpectedly empty");
       return true;
     }
 
@@ -113,12 +128,19 @@ bool BaseballTracker::parse_response_(const std::string &json_body) {
 
     // Abstract game state: "Preview", "Live", "Final"
     const char *abstract_state = game["status"]["abstractGameState"] | "Preview";
+    const char *detailed_state = game["status"]["detailedState"]     | "";
     if (strcmp(abstract_state, "Live") == 0) {
       state_.phase = GamePhase::LIVE;
     } else if (strcmp(abstract_state, "Final") == 0) {
       state_.phase = GamePhase::FINAL;
     } else {
       state_.phase = GamePhase::PREVIEW;
+    }
+
+    // Log phase transitions
+    if (prev.phase != state_.phase) {
+      ESP_LOGI(TAG, "Game phase changed: %d → %d (%s) [gamePk=%d]",
+               (int)prev.phase, (int)state_.phase, detailed_state, state_.game_pk);
     }
 
     // Teams
@@ -128,16 +150,26 @@ bool BaseballTracker::parse_response_(const std::string &json_body) {
     state_.away_score  = teams["away"]["score"] | 0;
     state_.home_score  = teams["home"]["score"] | 0;
 
-    // Pre-game: store a human-readable start time (UTC from API → local via RTC)
+    // Log score changes
+    if (state_.away_score != prev.away_score || state_.home_score != prev.home_score) {
+      ESP_LOGI(TAG, "Score update: %s %d, %s %d",
+               state_.away_abbrev.c_str(), state_.away_score,
+               state_.home_abbrev.c_str(), state_.home_score);
+    }
+
+    // Pre-game: store a human-readable start time (UTC from API)
     if (state_.phase == GamePhase::PREVIEW) {
       const char *game_date = game["gameDate"] | "";
-      // Store raw UTC string for now; we'll format it at draw time if RTC available
       state_.start_time_str = game_date;
+      ESP_LOGI(TAG, "Game preview: %s @ %s, start=%s",
+               state_.away_abbrev.c_str(), state_.home_abbrev.c_str(), game_date);
     }
 
     // Linescore (present for Live and Final)
     JsonObject ls = game["linescore"];
-    if (!ls.isNull()) {
+    if (ls.isNull()) {
+      ESP_LOGD(TAG, "No linescore in response (phase=%d)", (int)state_.phase);
+    } else {
       state_.inning         = ls["currentInning"] | 0;
       state_.inning_ordinal = ls["currentInningOrdinal"] | "";
       state_.is_top_inning  = ls["isTopInning"] | true;
@@ -145,21 +177,34 @@ bool BaseballTracker::parse_response_(const std::string &json_body) {
       state_.strikes        = ls["strikes"] | 0;
       state_.outs           = ls["outs"] | 0;
 
+      // Log inning changes at INFO; count/bases at VERBOSE
+      if (state_.inning != prev.inning || state_.is_top_inning != prev.is_top_inning) {
+        ESP_LOGI(TAG, "Inning: %s %s (%d outs)",
+                 state_.is_top_inning ? "Top" : "Bottom",
+                 state_.inning_ordinal.c_str(),
+                 state_.outs);
+      }
+
       JsonObject offense = ls["offense"];
       if (!offense.isNull()) {
         state_.runner_first  = !offense["first"].isNull();
         state_.runner_second = !offense["second"].isNull();
         state_.runner_third  = !offense["third"].isNull();
       }
-    }
 
-    ESP_LOGD(TAG, "Parsed: phase=%d %s%d %d-%d B%d S%d O%d bases=%d%d%d",
-             (int)state_.phase,
-             state_.is_top_inning ? "T" : "B",
-             state_.inning,
-             state_.away_score, state_.home_score,
-             state_.balls, state_.strikes, state_.outs,
-             (int)state_.runner_first, (int)state_.runner_second, (int)state_.runner_third);
+      ESP_LOGD(TAG, "%s @ %s  %d-%d  %s%s  B%d S%d O%d  bases:[%s%s%s]",
+               state_.away_abbrev.c_str(), state_.home_abbrev.c_str(),
+               state_.away_score, state_.home_score,
+               state_.is_top_inning ? "T" : "B", state_.inning_ordinal.c_str(),
+               state_.balls, state_.strikes, state_.outs,
+               state_.runner_first  ? "1" : "-",
+               state_.runner_second ? "2" : "-",
+               state_.runner_third  ? "3" : "-");
+
+      ESP_LOGV(TAG, "Count detail — balls=%d strikes=%d outs=%d  runners: 1st=%d 2nd=%d 3rd=%d",
+               state_.balls, state_.strikes, state_.outs,
+               (int)state_.runner_first, (int)state_.runner_second, (int)state_.runner_third);
+    }
 
     return true;
   });
@@ -170,7 +215,12 @@ bool BaseballTracker::parse_response_(const std::string &json_body) {
 // ---------------------------------------------------------------------------
 
 void BaseballTracker::draw_game() {
-  if (display_ == nullptr || font_ == nullptr) return;
+  if (display_ == nullptr || font_ == nullptr) {
+    ESP_LOGW(TAG, "draw_game() called but display or font is not set");
+    return;
+  }
+
+  ESP_LOGV(TAG, "draw_game() phase=%d", (int)state_.phase);
 
   switch (state_.phase) {
     case GamePhase::NONE:    draw_no_game_();  break;
