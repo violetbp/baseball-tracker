@@ -285,13 +285,22 @@ void BaseballTracker::draw_live_() {
   draw_centered_text_(78, 126, kRow1Y, home_buf, kCyan());
 
   // --- Row 1: inning centered between the two scores ---
-  // Format: "^ Bot 3rd" or "v Top 1st"
-  const char *half = state_.is_top_inning ? "^" : "v";
-  const char *side = state_.is_top_inning ? "Top" : "Bot";
-  char inn_buf[16];
-  snprintf(inn_buf, sizeof(inn_buf), "%s %s %s",
-           half, side, state_.inning_ordinal.c_str());
-  draw_centered_text_(38, 90, kRow1Y, inn_buf, kYellow());
+  // Show "^ 3rd" or "v 2nd" (no "top/bot" word), and place arrow next to the batting team
+  char inn_buf[8];
+  snprintf(inn_buf, sizeof(inn_buf), "%s %s",
+          //  state_.is_top_inning ? "^" : "v",
+          "",
+           state_.inning_ordinal.c_str());
+  if (state_.is_top_inning) {
+    // Away team batting, show "^ 3rd" left of center, blank in center
+    draw_centered_text_(38, 59, kRow1Y, "^", kYellow());
+    draw_centered_text_(60, 68, kRow1Y, inn_buf, kYellow());
+  } else {
+    // Home team batting, show "v 3rd" right of center, blank in center
+    draw_centered_text_(38, 59, kRow1Y, inn_buf, kYellow());
+    draw_centered_text_(60, 68, kRow1Y, "v", kYellow());
+
+  }
 
   // --- Row 2: balls-strikes text (left) ---
   char count_buf[8];

@@ -118,8 +118,8 @@ class BaseballTracker : public Component {
   static constexpr int kDiamondCY = 26;  // base diamond vertical center (bottom half)
 
   // Dot geometry (outs indicator)
-  static constexpr int kDotR    = 2;  // dot radius in pixels
-  static constexpr int kDotStep = 6;  // pixel spacing between dot centers
+  static constexpr int kDotR    = 3;  // dot radius in pixels
+  static constexpr int kDotStep = 8;  // pixel spacing between dot centers
 };
 
 }  // namespace baseball_tracker
