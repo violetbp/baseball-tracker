@@ -1,6 +1,6 @@
 import esphome.codegen as cg
 import esphome.config_validation as cv
-from esphome.components import binary_sensor, switch_ as sw
+from esphome.components import binary_sensor, switch as sw
 from esphome.components.display import Display
 from esphome.components.font import Font
 from esphome.components.time import RealTimeClock
