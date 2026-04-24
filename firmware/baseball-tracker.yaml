@@ -82,18 +82,6 @@ update:
     name: Firmware Update
     source: https://transit-tracker.eastsideurbanism.org/firmware/manifest.json
 
-# ── ADD THIS ─────────────────────────────────────────────────────────────────
-baseball_tracker:
-  id: baseball
-  # team_id 136 = Seattle Mariners (default; you can omit this line)
-  team_id: 136
-  # poll_interval controls how often the live game data refreshes.
-  # Falls back to 5 min automatically when no game is in progress.
-  poll_interval: 30s
-  # font_id and display_id default to the first declared font/display in your
-  # config — set them explicitly if you have more than one.
-# ─────────────────────────────────────────────────────────────────────────────
-
 switch:
   - platform: template
     id: flip_display_config
@@ -126,6 +114,21 @@ switch:
     turn_off_action:
       - display.page.show: transit_schedule
   # ──────────────────────────────────────────────────────────────────────────
+
+# Place after `baseball_display_switch` so the id resolves cleanly.
+# ── baseball_tracker ──────────────────────────────────────────────────────
+baseball_tracker:
+  id: baseball
+  team_id: 136
+  poll_interval: 30s
+  # Auto: show the baseball page from 5 min before first pitch; hide after Final
+  # (device clock must be NTP sync’d). Requires baseball_page_switch below.
+  auto_baseball_page: true
+  auto_page_lead: 5min
+  baseball_page_switch: baseball_display_switch
+  game_in_progress:
+    name: "MLB game in progress"
+# ──────────────────────────────────────────────────────────────────────────
 
 button:
   - platform: restart

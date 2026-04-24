@@ -72,6 +72,14 @@ baseball_tracker:
   id: baseball
   team_id: 136        # 136 = Seattle Mariners (default; omit for Mariners)
   poll_interval: 30s  # refresh rate during live games; auto-slows to 5 min otherwise
+  # Optional: auto-show the baseball display from N minutes before first pitch (UTC vs device clock)
+  # through the end of the game; turn off after Final. Requires a template switch id (see firmware).
+  auto_baseball_page: true
+  auto_page_lead: 5min
+  baseball_page_switch: baseball_display_switch
+  # Optional: Home Assistant sees this while the game is Live
+  game_in_progress:
+    name: "MLB game in progress"
 ```
 
 `font_id` and `display_id` default to the first font and display declared in the config — the Pixolletta font and `matrix` display from transit-tracker.yaml are picked up automatically.

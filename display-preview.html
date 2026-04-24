@@ -133,10 +133,15 @@
     // ─── Constants matching baseball_tracker.h ───────────────────────────────
     const W          = 128;
     const H          = 32;
-    const kRow1Y     = 2;   // top row text baseline
-    const kRow2Y     = 22;  // bottom row text/dots baseline
-    const kDiamondCX = 64;  // base diamond horizontal center
-    const kDiamondCY = 25;  // matches baseball_tracker.h (enlarged diamond)
+    const kRow1Y = 1;   // line 1: scoreboard
+    const kRow2Y = 9;   // line 2: B–S only
+    const kOutDotsY = 23;
+    const kDiamondCY = 20;
+    const kOutsFirstX = 100;
+    const kDiamondOutPadding = 5;  // gap between diamond and first out dot
+    const kRow2RightX = 126;      // B–S right edge
+    const d13x = 7, basePad = 2;  // must match draw_bases_
+    const kDiamondRight = d13x + basePad;
     const kDotR      = 3;  // baseball_tracker.h
     const kDotStep   = 8;
 
@@ -144,9 +149,9 @@
     const C_WHITE  = '#ffffff';
     const C_YELLOW = '#ffff00';
     const C_GREEN  = '#00ff00';
-    const C_RED    = '#ff4444';
+    const C_RED    = '#ff0000';  // kRed() Color(255, 0, 0)
     const C_CYAN   = '#00ffff';
-    const C_DIM    = '#404040';
+    const C_DIM    = '#505050';  // kDim() Color(80, 80, 80)
     const C_BG     = '#050505';
 
     // ─── Canvas setup ────────────────────────────────────────────────────────
@@ -198,25 +203,6 @@
     // Mirrors draw_bases_(cx, cy) — enlarged 5×5 base pads, full infield outline
     function drawBases(cx, cy, state) {
       const d2y = -7, d13x = 7, d13y = 3, homey = 5, pad = 2;
-      const bases = [
-        { dx: 0,      dy: d2y,  occupied: state.runner_second },
-        { dx: -d13x, dy: d13y, occupied: state.runner_third  },
-        { dx: d13x,  dy: d13y, occupied: state.runner_first  },
-      ];
-
-      for (const b of bases) {
-        const bx = cx + b.dx;
-        const by = cy + b.dy;
-        if (b.occupied) {
-          ctx.fillStyle = C_YELLOW;
-          ctx.fillRect(bx - pad, by - pad, 2 * pad + 1, 2 * pad + 1);
-        } else {
-          ctx.strokeStyle = C_DIM;
-          ctx.lineWidth = 0.75;
-          ctx.strokeRect(bx - pad - 0.5, by - pad - 0.5, 2 * pad + 1, 2 * pad + 1);
-        }
-      }
-
       const x2 = cx, y2 = cy + d2y;
       const x3 = cx - d13x, y3 = cy + d13y;
       const x1 = cx + d13x, y1 = cy + d13y;
@@ -231,6 +217,23 @@
       ctx.moveTo(x1, y1); ctx.lineTo(xh, yh);
       ctx.stroke();
 
+      const bases = [
+        { dx: 0,      dy: d2y,  occupied: state.runner_second },
+        { dx: -d13x, dy: d13y, occupied: state.runner_third  },
+        { dx: d13x,  dy: d13y, occupied: state.runner_first  },
+      ];
+      for (const b of bases) {
+        const bx = cx + b.dx;
+        const by = cy + b.dy;
+        if (b.occupied) {
+          ctx.fillStyle = C_YELLOW;
+          ctx.fillRect(bx - pad, by - pad, 2 * pad + 1, 2 * pad + 1);
+        } else {
+          ctx.strokeStyle = C_DIM;
+          ctx.lineWidth = 0.75;
+          ctx.strokeRect(bx - pad - 0.5, by - pad - 0.5, 2 * pad + 1, 2 * pad + 1);
+        }
+      }
       ctx.strokeStyle = C_DIM;
       ctx.strokeRect(xh - 1.5, yh - 1.5, 3, 3);
     }
@@ -276,15 +279,16 @@
         drawCentered(60, 68, kRow1Y, 'v', C_YELLOW);
       }
 
-      // ── Row 2: balls-strikes count text (left) ────────────────────────────
-      drawText(2, kRow2Y, `${state.balls}-${state.strikes}`, C_WHITE);
+      // Line 2: B–S right-aligned
+      {
+        const t = `${state.balls}-${state.strikes}`;
+        drawText(kRow2RightX - textWidth(t), kRow2Y, t, C_WHITE);
+      }
 
-      // ── Row 2: base diamond (center: kDiamondCX=64, kDiamondCY=25) ───────
-      drawBases(kDiamondCX, kDiamondCY, state);
-
-      // ── Row 2: out dots (right, x=98) ────────────────────────────────────
-      // Vertically center dots on the text baseline: y = kRow2Y + kDotR
-      drawDots(98, kRow2Y + kDotR, 3, state.outs, C_RED, C_DIM);
+      // Line 3: diamond with padding before out dots
+      const diamondCX = kOutsFirstX - kDotR - kDiamondOutPadding - kDiamondRight;
+      drawBases(diamondCX, kDiamondCY, state);
+      drawDots(kOutsFirstX, kOutDotsY, 3, state.outs, C_RED, C_DIM);
     }
 
     // Mirrors draw_final_()
@@ -409,8 +413,8 @@
     // ─── Fetch loop ───────────────────────────────────────────────────────────
 
     const API =
-      'https://statsapi.mlb.com/api/v1/schedule?sportId=1&teamId=136&hydrate=linescore,team';
-
+      'https://statsapi.mlb.com/api/v1/schedule?sportId=1&teamId=120&hydrate=linescore,team';
+//136
     let currentState = null;
 
     async function fetchAndRender() {

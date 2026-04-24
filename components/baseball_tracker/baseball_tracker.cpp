@@ -2,9 +2,27 @@
 
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
+#include <ctime>
+#include <cstdlib>
+#include <cstring>
 
 #include "esphome/core/log.h"
 #include "esphome/components/json/json_util.h"
+
+// ISO8601 in UTC: mktime with TZ=UTC
+static time_t utc_time_from_tm(struct tm *tp) {
+  const char *prev = getenv("TZ");
+  setenv("TZ", "UTC0", 1);
+  tzset();
+  time_t ret = mktime(tp);
+  if (prev != nullptr) {
+    setenv("TZ", prev, 1);
+  } else {
+    unsetenv("TZ");
+  }
+  tzset();
+  return ret;
+}
 
 namespace esphome {
 namespace baseball_tracker {
@@ -25,15 +43,16 @@ static const char *const MLB_SCHEDULE_PATH =
 
 void BaseballTracker::setup() {
   ESP_LOGCONFIG(TAG, "Setting up Baseball Tracker (team_id=%d)", team_id_);
-  fetch_game_data_();
-
 }
 
 void BaseballTracker::loop() {
   uint32_t now = millis();
 
+  // Poll faster during live; slow down the rest to be polite to the API.
   uint32_t effective_interval = poll_interval_ms_;
-  
+  if (state_.phase != GamePhase::LIVE) {
+    effective_interval = 5 * 60 * 1000;  // 5 min when not live
+  }
 
   if (!first_poll_done_ || (now - last_poll_ms_) >= effective_interval) {
     ESP_LOGD(TAG, "Polling MLB API (interval=%u ms, phase=%d)", effective_interval, (int)state_.phase);
@@ -42,10 +61,11 @@ void BaseballTracker::loop() {
     first_poll_done_ = true;
   }
 
-  // First poll happens immediately once; subsequent polls respect the interval.
-  // When the game is not live we slow down to 5 minutes to be polite to the API.
-  if (state_.phase != GamePhase::LIVE) {
-    effective_interval = 5 * 60 * 1000;  // 5 min when not live
+  // 1Hz: auto page + binary_sensor (cheap)
+  if (now - last_auto_logic_ms_ >= 1000) {
+    last_auto_logic_ms_ = now;
+    try_auto_baseball_page_();
+    update_game_in_progress_sensor_();
   }
 }
 
@@ -53,6 +73,10 @@ void BaseballTracker::dump_config() {
   ESP_LOGCONFIG(TAG, "Baseball Tracker:");
   ESP_LOGCONFIG(TAG, "  Team ID: %d", team_id_);
   ESP_LOGCONFIG(TAG, "  Poll interval: %u ms", poll_interval_ms_);
+  ESP_LOGCONFIG(TAG, "  Auto baseball page: %s", auto_baseball_page_ ? "yes" : "no");
+  ESP_LOGCONFIG(TAG, "  Auto lead before start: %u s", auto_page_lead_sec_);
+  ESP_LOGCONFIG(TAG, "  Linked baseball page switch: %s", baseball_page_switch_ == nullptr ? "no" : "yes");
+  ESP_LOGCONFIG(TAG, "  Game in progress binary sensor: %s", game_in_progress_sensor_ == nullptr ? "no" : "yes");
 }
 
 // ---------------------------------------------------------------------------
@@ -130,6 +154,17 @@ bool BaseballTracker::parse_response_(const std::string &json_body) {
 
     state_.game_pk = game["gamePk"] | 0;
 
+    // First pitch time (all phases): ISO8601 UTC
+    {
+      const char *gd = game["gameDate"] | "";
+      state_.start_time_str = gd;
+      if (gd[0] == '\0' || !parse_iso8601_utc(gd, &state_.game_start_utc) || state_.game_start_utc <= 0) {
+        state_.has_game_start = false;
+      } else {
+        state_.has_game_start = true;
+      }
+    }
+
     // Abstract game state: "Preview", "Live", "Final"
     const char *abstract_state = game["status"]["abstractGameState"] | "Preview";
     const char *detailed_state = game["status"]["detailedState"]     | "";
@@ -161,12 +196,9 @@ bool BaseballTracker::parse_response_(const std::string &json_body) {
                state_.home_abbrev.c_str(), state_.home_score);
     }
 
-    // Pre-game: store a human-readable start time (UTC from API)
     if (state_.phase == GamePhase::PREVIEW) {
-      const char *game_date = game["gameDate"] | "";
-      state_.start_time_str = game_date;
       ESP_LOGI(TAG, "Game preview: %s @ %s, start=%s",
-               state_.away_abbrev.c_str(), state_.home_abbrev.c_str(), game_date);
+               state_.away_abbrev.c_str(), state_.home_abbrev.c_str(), state_.start_time_str.c_str());
     }
 
     // Linescore (present for Live and Final)
@@ -270,21 +302,22 @@ void BaseballTracker::draw_pregame_() {
 void BaseballTracker::draw_live_() {
   auto *d = display_;
 
-  // ---- Layout ----
-  // Row 1: [away abbrev + score] ... [^ Bot 3rd] ... [home abbrev + score]
-  // Row 2: [B-S count] ... [base diamond, centered] ... [out dots]
+  // ---- Layout (3 lines) ----
+  // Line 1: [away+score] ... [inning] ... [home+score]
+  // Line 2: [B–S] right-aligned
+  // Line 3: [diamond] ... [padding] ... [out dots]
 
-  // --- Row 1: away team + score (left) ---
+  // --- Line 1: away team + score (left) ---
   char away_buf[16];
   snprintf(away_buf, sizeof(away_buf), "%s  %d", state_.away_abbrev.c_str(), state_.away_score);
   d->print(2, kRow1Y, font_, kCyan(), away_buf);
 
-  // --- Row 1: home team + score (right, right-aligned) ---
+  // --- Line 1: home team + score (right) ---
   char home_buf[16];
   snprintf(home_buf, sizeof(home_buf), "%d  %s", state_.home_score, state_.home_abbrev.c_str());
   draw_centered_text_(78, 126, kRow1Y, home_buf, kCyan());
 
-  // --- Row 1: inning centered between the two scores ---
+  // --- Line 1: inning centered between the two scores ---
   // Show "^ 3rd" or "v 2nd" (no "top/bot" word), and place arrow next to the batting team
   char inn_buf[8];
   snprintf(inn_buf, sizeof(inn_buf), "%s %s",
@@ -302,19 +335,20 @@ void BaseballTracker::draw_live_() {
 
   }
 
-  // --- Row 2: balls-strikes text (left) ---
+  // --- Line 2: balls-strikes, right-aligned (same right edge as home block on line 1) ---
   char count_buf[8];
   snprintf(count_buf, sizeof(count_buf), "%d-%d", state_.balls, state_.strikes);
-  d->print(2, kRow2Y, font_, kWhite(), count_buf);
+  draw_right_aligned_text_(kRow2RightX, kRow2Y, count_buf, kWhite());
 
-  // --- Row 2: base diamond (center) ---
-  draw_bases_(kDiamondCX, kDiamondCY);
+  // --- Line 3: diamond (left of outs) + out dots (right) —
+  // First out dot’s left: kOutsFirstX - kDotR; keep kDiamondOutPadding after diamond’s right.
+  static constexpr int d13x = 7;
+  static constexpr int base_pad = 2;
+  int diamond_right = d13x + base_pad;  // right extent from cx to 1st-base tile edge
+  int diamond_cx = kOutsFirstX - kDotR - kDiamondOutPadding - diamond_right;
+  draw_bases_(diamond_cx, kDiamondCY);
 
-  // --- Row 2: outs dots (right) ---
-  // Three dots: red = out recorded, dim = remaining
-  int outs_x = 98;
-  int outs_y = kRow2Y + (kDotR);  // vertically center dots on the text baseline
-  draw_dots_(outs_x, outs_y, 3, state_.outs, kRed(), kDim());
+  draw_dots_(kOutsFirstX, kOutDotsY, 3, state_.outs, kRed(), kDim());
 }
 
 // ---------------------------------------------------------------------------
@@ -369,16 +403,6 @@ void BaseballTracker::draw_bases_(int cx, int cy) {
     { d13x, d13y, state_.runner_first}, // 1st
   };
 
-  for (auto &b : bases) {
-    int bx = cx + b.dx;
-    int by = cy + b.dy;
-    if (b.occupied) {
-      d->filled_rectangle(bx - pad, by - pad, 2 * pad + 1, 2 * pad + 1, kYellow());
-    } else {
-      d->rectangle(bx - pad, by - pad, 2 * pad + 1, 2 * pad + 1, kDim());
-    }
-  }
-
   // Connect bases + home
   int x2 = cx, y2 = cy + d2y;
   int x3 = cx - d13x, y3 = cy + d13y;
@@ -389,6 +413,16 @@ void BaseballTracker::draw_bases_(int cx, int cy) {
   d->line(x2, y2, x1, y1, kDim());
   d->line(x3, y3, xh, yh, kDim());
   d->line(x1, y1, xh, yh, kDim());
+
+  for (auto &b : bases) {
+    int bx = cx + b.dx;
+    int by = cy + b.dy;
+    if (b.occupied) {
+      d->filled_rectangle(bx - pad, by - pad, 2 * pad + 1, 2 * pad + 1, kYellow());
+    } else {
+      d->rectangle(bx - pad, by - pad, 2 * pad + 1, 2 * pad + 1, kDim());
+    }
+  }
 
   // Home: small 3×3 dim square (reads better than a single pixel)
   d->rectangle(xh - 1, yh - 1, 3, 3, kDim());
@@ -425,6 +459,109 @@ void BaseballTracker::draw_centered_text_(int x_start, int x_end, int y, const c
   int center = (x_start + x_end) / 2;
   int draw_x = center - text_w / 2;
   display_->print(draw_x, y, font_, color, text);
+}
+
+void BaseballTracker::draw_right_aligned_text_(int x_end, int y, const char *text, Color color) {
+  if (display_ == nullptr || font_ == nullptr) return;
+
+  int text_w = 0, text_h = 0, x_off = 0, y_off = 0;
+  display_->get_text_bounds(0, 0, text, font_, display::TextAlign::TOP_LEFT,
+                            &x_off, &y_off, &text_w, &text_h);
+
+  int draw_x = x_end - text_w;
+  if (draw_x < 0) {
+    draw_x = 0;
+  }
+  display_->print(draw_x, y, font_, color, text);
+}
+
+// ---------------------------------------------------------------------------
+// ISO-8601 UTC (MLB: 2026-04-22T20:10:00Z)
+// ---------------------------------------------------------------------------
+
+bool BaseballTracker::parse_iso8601_utc(const char *iso, time_t *out) {
+  if (iso == nullptr || *iso == 0) {
+    return false;
+  }
+  char buf[32];
+  strncpy(buf, iso, sizeof(buf) - 1);
+  buf[sizeof(buf) - 1] = 0;
+  if (char *p = strchr(buf, '.')) {
+    *p = 0;
+  }
+  int y, mo, d, h, mi, s;
+  if (sscanf(buf, "%d-%d-%dT%d:%d:%d", &y, &mo, &d, &h, &mi, &s) < 6) {
+    return false;
+  }
+  struct tm t = {};
+  t.tm_year = y - 1900;
+  t.tm_mon = mo - 1;
+  t.tm_mday = d;
+  t.tm_hour = h;
+  t.tm_min = mi;
+  t.tm_sec = s;
+  *out = utc_time_from_tm(&t);
+  return *out > 0;
+}
+
+bool BaseballTracker::should_auto_show_baseball_() const {
+  if (state_.phase == GamePhase::NONE) {
+    return false;
+  }
+  if (state_.phase == GamePhase::FINAL) {
+    return false;
+  }
+  if (state_.phase == GamePhase::LIVE) {
+    return true;
+  }
+  // PREVIEW: show from (start − lead) until first pitch (stays in PREVIEW until go)
+  if (state_.phase == GamePhase::PREVIEW) {
+    if (rtc_ == nullptr || !state_.has_game_start) {
+      return false;
+    }
+    time_t now_ts = rtc_->utcnow().timestamp;
+    if (now_ts < 1) {  // clock not set / invalid
+      return false;
+    }
+    time_t t0 = state_.game_start_utc - static_cast<time_t>(auto_page_lead_sec_);
+    return now_ts >= t0;
+  }
+  return false;
+}
+
+void BaseballTracker::try_auto_baseball_page_() {
+  if (!auto_baseball_page_ || baseball_page_switch_ == nullptr) {
+    return;
+  }
+  if (rtc_ == nullptr) {
+    return;
+  }
+
+  bool want = this->should_auto_show_baseball_();
+  if (want == last_auto_show_cmd_) {
+    return;
+  }
+  if (want) {
+    baseball_page_switch_->turn_on();
+    ESP_LOGI(TAG, "Auto page: show baseball (T−%us window / live started)", auto_page_lead_sec_);
+  } else {
+    baseball_page_switch_->turn_off();
+    ESP_LOGI(TAG, "Auto page: return to transit (no game, final, or before window)");
+  }
+  last_auto_show_cmd_ = want;
+}
+
+void BaseballTracker::update_game_in_progress_sensor_() {
+  if (game_in_progress_sensor_ == nullptr) {
+    return;
+  }
+  bool live = (state_.phase == GamePhase::LIVE);
+  if (in_progress_sensor_published_ && live == last_published_in_progress_) {
+    return;
+  }
+  game_in_progress_sensor_->publish_state(live);
+  last_published_in_progress_ = live;
+  in_progress_sensor_published_ = true;
 }
 
 }  // namespace baseball_tracker
