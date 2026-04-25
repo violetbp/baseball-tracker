@@ -1,0 +1,9 @@
+firmware/local-tracker.yaml
+firmware/secrets.yaml
+.zsh_history
+flake.lock
+.direnv/
+firmware/fonts/Pixolletta8px.ttf 
+# unsure if I can include the font..
+.platformio/
+components/baseball_tracker/__pycache__/

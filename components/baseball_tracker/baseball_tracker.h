@@ -52,6 +52,9 @@ struct GameState {
   time_t game_start_utc{0};
   bool has_game_start{false};
 
+  /// MLB status.detailedState (e.g. "Scheduled", "Warmup", "Postponed")
+  std::string detailed_state;
+
   // Game primary key for potential future live-feed polling
   int game_pk{0};
 };
@@ -142,7 +145,9 @@ class BaseballTracker : public Component {
   static constexpr int kDisplayW  = 128;
   static constexpr int kDisplayH  = 32;
   static constexpr int kRow1Y = 1;  // line 1: teams, scores, inning
-  static constexpr int kRow2Y = 9;  // line 2: balls-strikes text only (live)
+  static constexpr int kRow2Y = 9;  // line 2: time (pregame) or balls-strikes (live)
+  // Pregame: detailedState under the time (row 2). Live: diamond/out row uses kOutDotsY.
+  static constexpr int kPregameRow3Y = 17;
   // Line 3: base diamond + out dots; outs are right-anchored; diamond leaves a gap
   // before the first out dot.
   static constexpr int kOutDotsY  = 23;  // vertical center of out circles

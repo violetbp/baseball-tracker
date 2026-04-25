@@ -134,7 +134,8 @@
     const W          = 128;
     const H          = 32;
     const kRow1Y = 1;   // line 1: scoreboard
-    const kRow2Y = 9;   // line 2: B–S only
+    const kRow2Y = 9;   // line 2: time (pregame) or B–S (live)
+    const kPregameRow3Y = 17;  // detailedState (pregame only); must match baseball_tracker.h
     const kOutDotsY = 23;
     const kDiamondCY = 20;
     const kOutsFirstX = 100;
@@ -153,6 +154,9 @@
     const C_CYAN   = '#00ffff';
     const C_DIM    = '#505050';  // kDim() Color(80, 80, 80)
     const C_BG     = '#050505';
+
+    // Pregame row 2: same idea as `ESPTime::from_epoch_local` + "%H:%M" — set to your firmware `time:` / `timezone:`.
+    const PREVIEW_LOCAL_TZ = 'America/Los_Angeles';
 
     // ─── Canvas setup ────────────────────────────────────────────────────────
     const canvas = document.getElementById('display');
@@ -181,6 +185,13 @@
       const w = textWidth(text);
       const x = Math.round((xStart + xEnd) / 2 - w / 2);
       drawText(x, y, text, color);
+    }
+
+    // Mirrors draw_right_aligned_text_(x_end, y, text, color)
+    function drawRightAlignedText(xEnd, y, text, color) {
+      const w = textWidth(text);
+      const drawX = Math.max(0, xEnd - w);
+      drawText(drawX, y, text, color);
     }
 
     // Mirrors draw_dots_(x, y, count, filled, on_color, off_color)
@@ -250,13 +261,27 @@
       // Row 1: "ATH @ SEA" centered
       drawCentered(0, W, kRow1Y, `${state.away_abbrev} @ ${state.home_abbrev}`, C_WHITE);
 
-      // Row 2: "HH:MM UTC" or "TBD" centered
+      // Row 2: first pitch local 24h "HH:MM" or "TBD" (has_game_start + parse, like firmware)
       let timeBuf = 'TBD';
-      const dt = state.start_time_str;
-      if (dt.length >= 16) {
-        timeBuf = `${dt[11]}${dt[12]}:${dt[14]}${dt[15]} UTC`;
+      if (state.has_game_start && state.start_time_str) {
+        const d0 = new Date(state.start_time_str);
+        if (!Number.isNaN(d0.getTime())) {
+          timeBuf = new Intl.DateTimeFormat('en-GB', {
+            timeZone: PREVIEW_LOCAL_TZ,
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: false,
+          }).format(d0);
+        }
       }
       drawCentered(0, W, kRow2Y, timeBuf, C_YELLOW);
+
+      // Row 3: char detail_buf[24] in firmware — at most 23 characters (no "…" in C++)
+      const d = (state.detailed_state || '').trim();
+      if (d.length > 0 && d.toLowerCase() !== 'in progress') {
+        const clipped = d.length > 23 ? d.slice(0, 23) : d;
+        drawCentered(0, W, kPregameRow3Y, clipped, C_DIM);
+      }
     }
 
     // Mirrors draw_live_()
@@ -279,11 +304,8 @@
         drawCentered(60, 68, kRow1Y, 'v', C_YELLOW);
       }
 
-      // Line 2: B–S right-aligned
-      {
-        const t = `${state.balls}-${state.strikes}`;
-        drawText(kRow2RightX - textWidth(t), kRow2Y, t, C_WHITE);
-      }
+      // Line 2: B–S right-aligned to kRow2RightX (see draw_right_aligned_text_)
+      drawRightAlignedText(kRow2RightX, kRow2Y, `${state.balls}-${state.strikes}`, C_WHITE);
 
       // Line 3: diamond with padding before out dots
       const diamondCX = kOutsFirstX - kDotR - kDiamondOutPadding - kDiamondRight;
@@ -331,7 +353,7 @@
         inning: 0, inning_ordinal: '', is_top_inning: true,
         balls: 0, strikes: 0, outs: 0,
         runner_first: false, runner_second: false, runner_third: false,
-        start_time_str: '', game_pk: 0,
+        start_time_str: '', has_game_start: false, detailed_state: '', game_pk: 0,
       };
 
       if (!data.totalGames || data.totalGames === 0) return s;
@@ -344,19 +366,21 @@
 
       s.game_pk = game.gamePk || 0;
 
+      s.start_time_str = game.gameDate || '';
+      s.has_game_start = Boolean(s.start_time_str && !Number.isNaN(Date.parse(s.start_time_str)));
+
+      s.detailed_state = game.status?.detailedState || '';
       const abs = game.status?.abstractGameState || 'Preview';
-      if      (abs === 'Live')  s.phase = 'LIVE';
+      // Treat "Warmup" detailed state as PREVIEW, regardless of abstract (matches parse_response_)
+      if (s.detailed_state === 'Warmup') s.phase = 'PREVIEW';
+      else if (abs === 'Live') s.phase = 'LIVE';
       else if (abs === 'Final') s.phase = 'FINAL';
-      else                      s.phase = 'PREVIEW';
+      else s.phase = 'PREVIEW';
 
       s.away_abbrev = game.teams?.away?.team?.abbreviation || '???';
       s.home_abbrev = game.teams?.home?.team?.abbreviation || '???';
       s.away_score  = game.teams?.away?.score ?? 0;
       s.home_score  = game.teams?.home?.score ?? 0;
-
-      if (s.phase === 'PREVIEW') {
-        s.start_time_str = game.gameDate || '';
-      }
 
       const ls = game.linescore;
       if (ls) {
@@ -398,10 +422,19 @@
           `Final · ${state.away_abbrev} ${state.away_score} @ ${state.home_abbrev} ${state.home_score}`;
       } else if (state.phase === 'PREVIEW') {
         dot.classList.add('preview');
-        const dt = state.start_time_str;
-        const time = dt.length >= 16 ? `${dt[11]}${dt[12]}:${dt[14]}${dt[15]} UTC` : '';
+        let timeStr = 'TBD';
+        if (state.has_game_start && state.start_time_str) {
+          const d0 = new Date(state.start_time_str);
+          if (!Number.isNaN(d0.getTime())) {
+            timeStr = new Intl.DateTimeFormat('en-GB', {
+              timeZone: PREVIEW_LOCAL_TZ, hour: '2-digit', minute: '2-digit', hour12: false,
+            }).format(d0) + ' local';
+          }
+        }
+        const det = (state.detailed_state || '').trim();
+        const sub = (det && det.toLowerCase() !== 'in progress') ? ` · ${det}` : '';
         text.textContent =
-          `Scheduled · ${state.away_abbrev} @ ${state.home_abbrev}  ·  ${time}`;
+          `Preview · ${state.away_abbrev} @ ${state.home_abbrev}  ·  ${timeStr}${sub}`;
       } else {
         text.textContent = 'No game today';
       }
@@ -413,8 +446,7 @@
     // ─── Fetch loop ───────────────────────────────────────────────────────────
 
     const API =
-      'https://statsapi.mlb.com/api/v1/schedule?sportId=1&teamId=120&hydrate=linescore,team';
-//136
+      'https://statsapi.mlb.com/api/v1/schedule?sportId=1&teamId=136&hydrate=linescore,team';
     let currentState = null;
 
     async function fetchAndRender() {

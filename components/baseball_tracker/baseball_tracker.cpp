@@ -5,6 +5,7 @@
 #include <ctime>
 #include <cstdlib>
 #include <cstring>
+#include <strings.h>
 
 #include "esphome/core/log.h"
 #include "esphome/components/json/json_util.h"
@@ -43,22 +44,25 @@ static const char *const MLB_SCHEDULE_PATH =
 
 void BaseballTracker::setup() {
   ESP_LOGCONFIG(TAG, "Setting up Baseball Tracker (team_id=%d)", team_id_);
+  fetch_game_data_();
 }
 
 void BaseballTracker::loop() {
   uint32_t now = millis();
-
-  // Poll faster during live; slow down the rest to be polite to the API.
   uint32_t effective_interval = poll_interval_ms_;
-  if (state_.phase != GamePhase::LIVE) {
-    effective_interval = 5 * 60 * 1000;  // 5 min when not live
-  }
+
+  
 
   if (!first_poll_done_ || (now - last_poll_ms_) >= effective_interval) {
     ESP_LOGD(TAG, "Polling MLB API (interval=%u ms, phase=%d)", effective_interval, (int)state_.phase);
     fetch_game_data_();
     last_poll_ms_ = now;
     first_poll_done_ = true;
+  }
+
+  // Poll faster during live; slow down the rest to be polite to the API.
+  if (state_.phase == GamePhase::LIVE) {
+    effective_interval = 5 * 60 * 1000;  // 5 min when not live
   }
 
   // 1Hz: auto page + binary_sensor (cheap)
@@ -168,6 +172,7 @@ bool BaseballTracker::parse_response_(const std::string &json_body) {
     // Abstract game state: "Preview", "Live", "Final"
     const char *abstract_state = game["status"]["abstractGameState"] | "Preview";
     const char *detailed_state = game["status"]["detailedState"]     | "";
+    state_.detailed_state = detailed_state;
     if (strcmp(abstract_state, "Live") == 0) {
       state_.phase = GamePhase::LIVE;
     } else if (strcmp(abstract_state, "Final") == 0) {
@@ -284,15 +289,22 @@ void BaseballTracker::draw_pregame_() {
   snprintf(top, sizeof(top), "%s @ %s", state_.away_abbrev.c_str(), state_.home_abbrev.c_str());
   draw_centered_text_(0, kDisplayW, kRow1Y, top, kWhite());
 
-  // Row 2: start time (UTC ISO8601 → "HH:MM UTC") centered
-  // The API returns e.g. "2026-04-22T20:10:00Z"
-  const std::string &dt = state_.start_time_str;
+  // Row 2: first pitch in local 24h (device timezone from YAML `time:` / `timezone:`)
   char time_buf[16] = "TBD";
-  if (dt.size() >= 16) {
-    snprintf(time_buf, sizeof(time_buf), "%c%c:%c%c UTC",
-             dt[11], dt[12], dt[14], dt[15]);
+  if (state_.has_game_start && state_.game_start_utc > 0) {
+    ESPTime local = ESPTime::from_epoch_local(state_.game_start_utc);
+    if (local.is_valid()) {
+      local.strftime(time_buf, sizeof(time_buf), "%H:%M");
+    }
   }
   draw_centered_text_(0, kDisplayW, kRow2Y, time_buf, kYellow());
+
+  // Row 3: status text when MLB sends something other than "In Progress"
+  if (!state_.detailed_state.empty() && strcasecmp(state_.detailed_state.c_str(), "In Progress") != 0) {
+    char detail_buf[24];
+    snprintf(detail_buf, sizeof(detail_buf), "%s", state_.detailed_state.c_str());
+    draw_centered_text_(0, kDisplayW, kPregameRow3Y, detail_buf, kDim());
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -52,8 +52,9 @@ external_components:
   - source: github://tjhorner/esphome-transit-tracker@main
     refresh: 0s
   # ── ADD THIS ──────────────────────────────────────────────────────────────
-  - source: github://vboysepe/esphome-baseball-tracker@main
+  - source: github://violetbp/baseball-tracker@functional
     refresh: 0s
+ 
   # ──────────────────────────────────────────────────────────────────────────
 
 logger:
