@@ -1,34 +1,26 @@
 #include "baseball_tracker.h"
-
+#include "library.h"
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
 #include <ctime>
-#include <cstdlib>
 #include <cstring>
 #include <strings.h>
 
 #include "esphome/core/log.h"
 #include "esphome/components/json/json_util.h"
 
-// ISO8601 in UTC: mktime with TZ=UTC
-static time_t utc_time_from_tm(struct tm *tp) {
-  const char *prev = getenv("TZ");
-  setenv("TZ", "UTC0", 1);
-  tzset();
-  time_t ret = mktime(tp);
-  if (prev != nullptr) {
-    setenv("TZ", prev, 1);
-  } else {
-    unsetenv("TZ");
-  }
-  tzset();
-  return ret;
-}
-
 namespace esphome {
 namespace baseball_tracker {
 
 static const char *const TAG = "baseball_tracker";
+
+// Last name from MLB "fullName" (e.g. "J.P. Crawford" -> "Crawford")
+static std::string last_name_from_full_name(const char *full) {
+  if (full == nullptr || *full == '\0')
+    return "";
+  const char *sp = strrchr(full, ' ');
+  return sp != nullptr ? std::string(sp + 1) : std::string(full);
+}
 
 // ---------------------------------------------------------------------------
 // MLB Stats API – single endpoint that returns everything we need.
@@ -61,7 +53,7 @@ void BaseballTracker::loop() {
   }
 
   // Poll faster during live; slow down the rest to be polite to the API.
-  if (state_.phase == GamePhase::LIVE) {
+  if (state_.phase != GamePhase::LIVE) {
     effective_interval = 5 * 60 * 1000;  // 5 min when not live
   }
 
@@ -218,19 +210,35 @@ bool BaseballTracker::parse_response_(const std::string &json_body) {
       state_.strikes        = ls["strikes"] | 0;
       state_.outs           = ls["outs"] | 0;
 
-      // Log inning changes at INFO; count/bases at VERBOSE
-      if (state_.inning != prev.inning || state_.is_top_inning != prev.is_top_inning) {
-        ESP_LOGI(TAG, "Inning: %s %s (%d outs)",
-                 state_.is_top_inning ? "Top" : "Bottom",
-                 state_.inning_ordinal.c_str(),
-                 state_.outs);
+      state_.pitcher_last.clear();
+      state_.batter_last.clear();
+      JsonObject defense = ls["defense"];
+      if (!defense.isNull() && !defense["pitcher"].isNull()) {
+        const char *pn = defense["pitcher"]["fullName"] | "";
+        state_.pitcher_last = last_name_from_full_name(pn);
       }
-
       JsonObject offense = ls["offense"];
       if (!offense.isNull()) {
         state_.runner_first  = !offense["first"].isNull();
         state_.runner_second = !offense["second"].isNull();
         state_.runner_third  = !offense["third"].isNull();
+        if (!offense["batter"].isNull()) {
+          const char *bn = offense["batter"]["fullName"] | "";
+          state_.batter_last = last_name_from_full_name(bn);
+        }
+      }
+
+      const char *inning_state = ls["inningState"] | "";
+      state_.inning_intermission = InningIntermissionKind::NONE;
+      if (strcasecmp(inning_state, "Middle") == 0) {
+        state_.inning_intermission = InningIntermissionKind::MIDDLE;
+      } else if (strcasecmp(inning_state, "End") == 0) {
+        state_.inning_intermission = InningIntermissionKind::END;
+      }
+      if (state_.inning_intermission != InningIntermissionKind::NONE) {
+        state_.outs = 0;
+        state_.batter_last.clear();
+        state_.runner_first = state_.runner_second = state_.runner_third = false;
       }
 
       ESP_LOGD(TAG, "%s @ %s  %d-%d  %s%s  B%d S%d O%d  bases:[%s%s%s]",
@@ -245,6 +253,21 @@ bool BaseballTracker::parse_response_(const std::string &json_body) {
       ESP_LOGV(TAG, "Count detail — balls=%d strikes=%d outs=%d  runners: 1st=%d 2nd=%d 3rd=%d",
                state_.balls, state_.strikes, state_.outs,
                (int)state_.runner_first, (int)state_.runner_second, (int)state_.runner_third);
+
+      // Log inning changes at INFO (after intermission handling)
+      if (state_.inning != prev.inning || state_.is_top_inning != prev.is_top_inning ||
+          state_.inning_intermission != prev.inning_intermission) {
+        if (state_.inning_intermission == InningIntermissionKind::MIDDLE) {
+          ESP_LOGI(TAG, "Inning: Mid %s", state_.inning_ordinal.c_str());
+        } else if (state_.inning_intermission == InningIntermissionKind::END) {
+          ESP_LOGI(TAG, "Inning: End %s", state_.inning_ordinal.c_str());
+        } else {
+          ESP_LOGI(TAG, "Inning: %s %s (%d outs)",
+                   state_.is_top_inning ? "Top" : "Bottom",
+                   state_.inning_ordinal.c_str(),
+                   state_.outs);
+        }
+      }
     }
 
     return true;
@@ -316,8 +339,8 @@ void BaseballTracker::draw_live_() {
 
   // ---- Layout (3 lines) ----
   // Line 1: [away+score] ... [inning] ... [home+score]
-  // Line 2: [B–S] right-aligned
-  // Line 3: [diamond] ... [padding] ... [out dots]
+  // Line 2: [P: pitcher's last, truncated] (left) + [B–S] right
+  // Line 3: [AB: batter's last, truncated] (left) + [diamond] + [out dots] on the right
 
   // --- Line 1: away team + score (left) ---
   char away_buf[16];
@@ -327,30 +350,59 @@ void BaseballTracker::draw_live_() {
   // --- Line 1: home team + score (right) ---
   char home_buf[16];
   snprintf(home_buf, sizeof(home_buf), "%d  %s", state_.home_score, state_.home_abbrev.c_str());
-  draw_centered_text_(78, 126, kRow1Y, home_buf, kCyan());
+  draw_right_aligned_text_(126, kRow1Y, home_buf, kCyan());
 
   // --- Line 1: inning centered between the two scores ---
-  // Show "^ 3rd" or "v 2nd" (no "top/bot" word), and place arrow next to the batting team
-  char inn_buf[8];
-  snprintf(inn_buf, sizeof(inn_buf), "%s %s",
-          //  state_.is_top_inning ? "^" : "v",
-          "",
-           state_.inning_ordinal.c_str());
-  if (state_.is_top_inning) {
-    // Away team batting, show "^ 3rd" left of center, blank in center
-    draw_centered_text_(38, 59, kRow1Y, "^", kYellow());
-    draw_centered_text_(60, 68, kRow1Y, inn_buf, kYellow());
+  if (state_.inning_intermission != InningIntermissionKind::NONE) {
+    const char *prefix = state_.inning_intermission == InningIntermissionKind::MIDDLE ? "mid" : "end";
+    char label_buf[20];
+    if (!state_.inning_ordinal.empty()) {
+      snprintf(label_buf, sizeof(label_buf), "%s %s", prefix, state_.inning_ordinal.c_str());
+    } else {
+      snprintf(label_buf, sizeof(label_buf), "%s %d", prefix, state_.inning);
+    }
+    draw_centered_text_(40, 88, kRow1Y, label_buf, kYellow());
   } else {
-    // Home team batting, show "v 3rd" right of center, blank in center
-    draw_centered_text_(38, 59, kRow1Y, inn_buf, kYellow());
-    draw_centered_text_(60, 68, kRow1Y, "v", kYellow());
-
+    // Show "▲ 3rd" or "▼ 2nd"; arrow next to the batting team
+    char inn_buf[8];
+    snprintf(inn_buf, sizeof(inn_buf), "%s %s",
+            "",
+             state_.inning_ordinal.c_str());
+    if (state_.is_top_inning) {
+      draw_centered_text_(38, 59, kRow1Y, "▲", kYellow());
+      draw_centered_text_(54, 74, kRow1Y, inn_buf, kYellow());
+    } else {
+      draw_centered_text_(54, 74, kRow1Y, inn_buf, kYellow());
+      draw_centered_text_(128 - 59, 128 - 38, kRow1Y, "▼", kYellow());
+    }
   }
 
-  // --- Line 2: balls-strikes, right-aligned (same right edge as home block on line 1) ---
+  // --- Line 2: pitcher last name (left) + balls-strikes (right) ---
   char count_buf[8];
   snprintf(count_buf, sizeof(count_buf), "%d-%d", state_.balls, state_.strikes);
+  {
+    int count_w, count_h, cxo, cyo;
+    display_->get_text_bounds(0, 0, count_buf, font_, display::TextAlign::TOP_LEFT, &cxo, &cyo, &count_w,
+                                &count_h);
+    if (count_w < 0)
+      count_w = 0;
+    int max_p_w = kRow2RightX - 2 - count_w - 3;
+    if (max_p_w < 8)
+      max_p_w = 8;
+    char p_line[24];
+    const char *pl = state_.pitcher_last.empty() ? "--" : state_.pitcher_last.c_str();
+    snprintf(p_line, sizeof(p_line), "P: %s", pl);
+    draw_text_max_width_(2, kRow2Y, max_p_w, p_line, kDim());
+  }
   draw_right_aligned_text_(kRow2RightX, kRow2Y, count_buf, kWhite());
+
+  // --- Line 3 (top): current batter; bottom half still has diamond+outs below ---
+  {
+    const char *bl = state_.batter_last.empty() ? "--" : state_.batter_last.c_str();
+    char b_line[28];
+    snprintf(b_line, sizeof(b_line), "AB: %s", bl);
+    draw_text_max_width_(2, kPregameRow3Y, kLiveBatterNameMaxW, b_line, kCyan());
+  }
 
   // --- Line 3: diamond (left of outs) + out dots (right) —
   // First out dot’s left: kOutsFirstX - kDotR; keep kDiamondOutPadding after diamond’s right.
@@ -438,82 +490,6 @@ void BaseballTracker::draw_bases_(int cx, int cy) {
 
   // Home: small 3×3 dim square (reads better than a single pixel)
   d->rectangle(xh - 1, yh - 1, 3, 3, kDim());
-}
-
-// ---------------------------------------------------------------------------
-// Helper: draw a row of filled/hollow dots
-// ---------------------------------------------------------------------------
-
-int BaseballTracker::draw_dots_(int x, int y, int count, int filled, Color on_color, Color off_color) {
-  auto *d = display_;
-  for (int i = 0; i < count; i++) {
-    int cx = x + i * kDotStep;
-    if (i < filled) {
-      d->filled_circle(cx, y, kDotR, on_color);
-    } else {
-      d->circle(cx, y, kDotR, off_color);
-    }
-  }
-  return x + count * kDotStep;
-}
-
-// ---------------------------------------------------------------------------
-// Helper: draw text centered in an x range
-// ---------------------------------------------------------------------------
-
-void BaseballTracker::draw_centered_text_(int x_start, int x_end, int y, const char *text, Color color) {
-  if (display_ == nullptr || font_ == nullptr) return;
-
-  int text_w = 0, text_h = 0, x_off = 0, y_off = 0;
-  display_->get_text_bounds(0, 0, text, font_, display::TextAlign::TOP_LEFT,
-                            &x_off, &y_off, &text_w, &text_h);
-
-  int center = (x_start + x_end) / 2;
-  int draw_x = center - text_w / 2;
-  display_->print(draw_x, y, font_, color, text);
-}
-
-void BaseballTracker::draw_right_aligned_text_(int x_end, int y, const char *text, Color color) {
-  if (display_ == nullptr || font_ == nullptr) return;
-
-  int text_w = 0, text_h = 0, x_off = 0, y_off = 0;
-  display_->get_text_bounds(0, 0, text, font_, display::TextAlign::TOP_LEFT,
-                            &x_off, &y_off, &text_w, &text_h);
-
-  int draw_x = x_end - text_w;
-  if (draw_x < 0) {
-    draw_x = 0;
-  }
-  display_->print(draw_x, y, font_, color, text);
-}
-
-// ---------------------------------------------------------------------------
-// ISO-8601 UTC (MLB: 2026-04-22T20:10:00Z)
-// ---------------------------------------------------------------------------
-
-bool BaseballTracker::parse_iso8601_utc(const char *iso, time_t *out) {
-  if (iso == nullptr || *iso == 0) {
-    return false;
-  }
-  char buf[32];
-  strncpy(buf, iso, sizeof(buf) - 1);
-  buf[sizeof(buf) - 1] = 0;
-  if (char *p = strchr(buf, '.')) {
-    *p = 0;
-  }
-  int y, mo, d, h, mi, s;
-  if (sscanf(buf, "%d-%d-%dT%d:%d:%d", &y, &mo, &d, &h, &mi, &s) < 6) {
-    return false;
-  }
-  struct tm t = {};
-  t.tm_year = y - 1900;
-  t.tm_mon = mo - 1;
-  t.tm_mday = d;
-  t.tm_hour = h;
-  t.tm_min = mi;
-  t.tm_sec = s;
-  *out = utc_time_from_tm(&t);
-  return *out > 0;
 }
 
 bool BaseballTracker::should_auto_show_baseball_() const {

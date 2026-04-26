@@ -18,8 +18,15 @@ namespace baseball_tracker {
 enum class GamePhase {
   NONE,     // No game today
   PREVIEW,  // Scheduled, not started
-  LIVE,     // In progress
+  LIVE,     // In progress (or warmup)
   FINAL,    // Game over
+};
+
+/// linescore.inningState when not actively Top/Bottom (MLB sends "Middle", "End", etc.)
+enum class InningIntermissionKind {
+  NONE,
+  MIDDLE,  // between top and bottom of the same inning
+  END,     // inning complete, before next half-inning / next inning
 };
 
 struct GameState {
@@ -34,12 +41,17 @@ struct GameState {
   // Inning
   int inning{0};
   bool is_top_inning{true};
+  InningIntermissionKind inning_intermission{InningIntermissionKind::NONE};
   std::string inning_ordinal;  // "1st", "2nd", etc.
 
   // Count (only valid when Live)
   int balls{0};
   int strikes{0};
   int outs{0};
+
+  // Live only: from linescore defense.pitcher / offense.batter fullName
+  std::string pitcher_last;
+  std::string batter_last;
 
   // Base runners (true = occupied)
   bool runner_first{false};
@@ -98,6 +110,8 @@ class BaseballTracker : public Component {
   void draw_centered_text_(int x_start, int x_end, int y, const char *text, Color color);
   // Draw with right edge at x_end (e.g. align to 126)
   void draw_right_aligned_text_(int x_end, int y, const char *text, Color color);
+  // Truncate to fit in max_width_px (e.g. left column before the infield)
+  void draw_text_max_width_(int x, int y, int max_width_px, const char *text, Color color);
 
   // ---- data fetching ----
   void fetch_game_data_();
@@ -145,16 +159,18 @@ class BaseballTracker : public Component {
   static constexpr int kDisplayW  = 128;
   static constexpr int kDisplayH  = 32;
   static constexpr int kRow1Y = 1;  // line 1: teams, scores, inning
-  static constexpr int kRow2Y = 9;  // line 2: time (pregame) or balls-strikes (live)
+  static constexpr int kRow2Y = 11;  // line 2: time (pregame) or balls-strikes (live)
   // Pregame: detailedState under the time (row 2). Live: diamond/out row uses kOutDotsY.
-  static constexpr int kPregameRow3Y = 17;
+  static constexpr int kPregameRow3Y = 21;  // Pregame: detailedState; live: batter last name
   // Line 3: base diamond + out dots; outs are right-anchored; diamond leaves a gap
   // before the first out dot.
-  static constexpr int kOutDotsY  = 23;  // vertical center of out circles
+  static constexpr int kOutDotsY  = 24;  // vertical center of out circles
   static constexpr int kDiamondCY = 20;  // draw_bases_ centre (1st/3rd sit at kOutDotsY)
   static constexpr int kOutsFirstX  = 100;  // x of leftmost out-dot centre (group toward right edge)
   static constexpr int kDiamondOutPadding  = 5;  // min px gap between diamond and first out dot
   static constexpr int kRow2RightX = 126;  // B–S count right-align edge (see draw_right_aligned)
+  // Live: batter line stays left of the infield graphic (see draw_text_max_width_)
+  static constexpr int kLiveBatterNameMaxW = 68;
 
   // Dot geometry (outs indicator, line 3)
   static constexpr int kDotR    = 3;  // dot radius in pixels

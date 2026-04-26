@@ -141,6 +141,7 @@
     const kOutsFirstX = 100;
     const kDiamondOutPadding = 5;  // gap between diamond and first out dot
     const kRow2RightX = 126;      // B–S right edge
+    const kLiveBatterNameMaxW = 68;  // baseball_tracker.h
     const d13x = 7, basePad = 2;  // must match draw_bases_
     const kDiamondRight = d13x + basePad;
     const kDotR      = 3;  // baseball_tracker.h
@@ -192,6 +193,27 @@
       const w = textWidth(text);
       const drawX = Math.max(0, xEnd - w);
       drawText(drawX, y, text, color);
+    }
+
+    // Mirrors draw_text_max_width_
+    function drawTextMaxWidth(x, y, maxWidthPx, text, color) {
+      if (!text) return;
+      let s = String(text);
+      for (;;) {
+        if (s.length === 0) return;
+        if (textWidth(s) <= maxWidthPx) {
+          drawText(x, y, s, color);
+          return;
+        }
+        s = s.slice(0, -1);
+      }
+    }
+
+    function lastNameFromFull(full) {
+      if (!full) return '';
+      const t = String(full).trim();
+      const i = t.lastIndexOf(' ');
+      return i < 0 ? t : t.slice(i + 1);
     }
 
     // Mirrors draw_dots_(x, y, count, filled, on_color, off_color)
@@ -294,20 +316,38 @@
       // Format: "2  SEA"  (score on left of the pair)
       drawCentered(78, 126, kRow1Y, `${state.home_score}  ${state.home_abbrev}`, C_CYAN);
 
-      // Row 1 inning: draw_live_() — inn_buf = snprintf("%s %s", "", ordinal) → " 3rd"
-      const innBuf = ` ${state.inning_ordinal}`;
-      if (state.is_top_inning) {
-        drawCentered(38, 59, kRow1Y, '^', C_YELLOW);
-        drawCentered(60, 68, kRow1Y, innBuf, C_YELLOW);
+      // Row 1 inning (mid/end intermission vs top/bottom) — matches draw_live_()
+      if (state.inning_intermission === 'MIDDLE' || state.inning_intermission === 'END') {
+        const prefix = state.inning_intermission === 'MIDDLE' ? 'mid' : 'end';
+        const midStr = state.inning_ordinal
+          ? `${prefix} ${state.inning_ordinal}`
+          : `${prefix} ${state.inning}`;
+        drawCentered(40, 88, kRow1Y, midStr, C_YELLOW);
       } else {
-        drawCentered(38, 59, kRow1Y, innBuf, C_YELLOW);
-        drawCentered(60, 68, kRow1Y, 'v', C_YELLOW);
+        const innBuf = ` ${state.inning_ordinal}`;
+        if (state.is_top_inning) {
+          drawCentered(38, 59, kRow1Y, '^', C_YELLOW);
+          drawCentered(60, 68, kRow1Y, innBuf, C_YELLOW);
+        } else {
+          drawCentered(38, 59, kRow1Y, innBuf, C_YELLOW);
+          drawCentered(60, 68, kRow1Y, 'v', C_YELLOW);
+        }
       }
 
-      // Line 2: B–S right-aligned to kRow2RightX (see draw_right_aligned_text_)
-      drawRightAlignedText(kRow2RightX, kRow2Y, `${state.balls}-${state.strikes}`, C_WHITE);
+      // Line 2: P: + pitcher last (left) + B–S (right)
+      const countStr = `${state.balls}-${state.strikes}`;
+      const countW = textWidth(countStr);
+      const maxP = Math.max(8, kRow2RightX - 2 - countW - 3);
+      const pLast = state.pitcher_last || '';
+      const pLine = `P: ${pLast || '--'}`;
+      drawTextMaxWidth(2, kRow2Y, maxP, pLine, C_DIM);
+      drawRightAlignedText(kRow2RightX, kRow2Y, countStr, C_WHITE);
 
-      // Line 3: diamond with padding before out dots
+      // Line 3: AB: + batter last (left); diamond + outs still on the right
+      const bLine = `AB: ${state.batter_last || '--'}`;
+      drawTextMaxWidth(2, kPregameRow3Y, kLiveBatterNameMaxW, bLine, C_CYAN);
+
+      // Diamond + out dots
       const diamondCX = kOutsFirstX - kDotR - kDiamondOutPadding - kDiamondRight;
       drawBases(diamondCX, kDiamondCY, state);
       drawDots(kOutsFirstX, kOutDotsY, 3, state.outs, C_RED, C_DIM);
@@ -350,10 +390,11 @@
         phase: 'NONE',
         away_abbrev: '???', home_abbrev: '???',
         away_score: 0, home_score: 0,
-        inning: 0, inning_ordinal: '', is_top_inning: true,
+        inning: 0, inning_ordinal: '', is_top_inning: true, inning_intermission: null,
         balls: 0, strikes: 0, outs: 0,
         runner_first: false, runner_second: false, runner_third: false,
         start_time_str: '', has_game_start: false, detailed_state: '', game_pk: 0,
+        pitcher_last: '', batter_last: '',
       };
 
       if (!data.totalGames || data.totalGames === 0) return s;
@@ -391,11 +432,34 @@
         s.strikes        = ls.strikes               || 0;
         s.outs           = ls.outs                  || 0;
 
+        s.pitcher_last = '';
+        s.batter_last  = '';
+        if (ls.defense?.pitcher?.fullName) {
+          s.pitcher_last = lastNameFromFull(ls.defense.pitcher.fullName);
+        }
         const off = ls.offense;
         if (off) {
           s.runner_first  = off.first  != null;
           s.runner_second = off.second != null;
           s.runner_third  = off.third  != null;
+          if (off.batter?.fullName) {
+            s.batter_last = lastNameFromFull(off.batter.fullName);
+          }
+        }
+
+        const inningState = (ls.inningState || '').trim().toLowerCase();
+        s.inning_intermission = null;
+        if (inningState === 'middle') {
+          s.inning_intermission = 'MIDDLE';
+        } else if (inningState === 'end') {
+          s.inning_intermission = 'END';
+        }
+        if (s.inning_intermission != null) {
+          s.outs = 0;
+          s.batter_last = '';
+          s.runner_first = false;
+          s.runner_second = false;
+          s.runner_third = false;
         }
       }
 
@@ -411,11 +475,19 @@
       dot.className = 'status-dot';
       if (state.phase === 'LIVE') {
         dot.classList.add('live');
-        const half = state.is_top_inning ? 'Top' : 'Bot';
-        text.textContent =
-          `LIVE · ${state.away_abbrev} ${state.away_score} @ ${state.home_abbrev} ${state.home_score}` +
-          `  ·  ${half} ${state.inning_ordinal}` +
-          `  ·  ${state.balls}-${state.strikes} count, ${state.outs} out`;
+        if (state.inning_intermission === 'MIDDLE' || state.inning_intermission === 'END') {
+          const ord = state.inning_ordinal || String(state.inning);
+          const tag = state.inning_intermission === 'MIDDLE' ? 'Mid' : 'End';
+          text.textContent =
+            `LIVE · ${state.away_abbrev} ${state.away_score} @ ${state.home_abbrev} ${state.home_score}` +
+            `  ·  ${tag} ${ord}`;
+        } else {
+          const half = state.is_top_inning ? 'Top' : 'Bot';
+          text.textContent =
+            `LIVE · ${state.away_abbrev} ${state.away_score} @ ${state.home_abbrev} ${state.home_score}` +
+            `  ·  ${half} ${state.inning_ordinal}` +
+            `  ·  ${state.balls}-${state.strikes} count, ${state.outs} out`;
+        }
       } else if (state.phase === 'FINAL') {
         dot.classList.add('final');
         text.textContent =
