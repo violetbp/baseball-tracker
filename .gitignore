@@ -3,7 +3,9 @@ firmware/secrets.yaml
 .zsh_history
 flake.lock
 .direnv/
-firmware/fonts/Pixolletta8px.ttf 
+firmware/fonts/
 # unsure if I can include the font..
 .platformio/
 components/baseball_tracker/__pycache__/
+mlb_data/
+mlb_live_*

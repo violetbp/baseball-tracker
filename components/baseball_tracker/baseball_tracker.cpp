@@ -36,25 +36,28 @@ static const char *const MLB_SCHEDULE_PATH =
 
 void BaseballTracker::setup() {
   ESP_LOGCONFIG(TAG, "Setting up Baseball Tracker (team_id=%d)", team_id_);
-  fetch_game_data_();
+  // First fetch runs from loop() so we only mark first_poll_done_ after a successful response.
 }
 
 void BaseballTracker::loop() {
   uint32_t now = millis();
+  // After first success: fast poll while LIVE, else 5 min. Before first success: poll_interval only.
   uint32_t effective_interval = poll_interval_ms_;
-
-  
-
-  if (!first_poll_done_ || (now - last_poll_ms_) >= effective_interval) {
-    ESP_LOGD(TAG, "Polling MLB API (interval=%u ms, phase=%d)", effective_interval, (int)state_.phase);
-    fetch_game_data_();
-    last_poll_ms_ = now;
-    first_poll_done_ = true;
+  if (first_poll_done_) {
+    if (state_.phase != GamePhase::LIVE) {
+      effective_interval = 5 * 60 * 1000;  // 5 min when not live
+    }
   }
 
-  // Poll faster during live; slow down the rest to be polite to the API.
-  if (state_.phase != GamePhase::LIVE) {
-    effective_interval = 5 * 60 * 1000;  // 5 min when not live
+  // last_poll_ms_ == 0: never polled yet (run once right after boot).
+  if (last_poll_ms_ == 0 || (now - last_poll_ms_) >= effective_interval) {
+    ESP_LOGD(TAG, "Polling MLB API (interval=%u ms, phase=%d, first_ok=%s)", effective_interval,
+             (int)state_.phase, first_poll_done_ ? "yes" : "no");
+    bool ok = fetch_game_data_();
+    last_poll_ms_ = now;
+    if (ok) {
+      first_poll_done_ = true;
+    }
   }
 
   // 1Hz: auto page + binary_sensor (cheap)
@@ -75,11 +78,32 @@ void BaseballTracker::dump_config() {
   ESP_LOGCONFIG(TAG, "  Game in progress binary sensor: %s", game_in_progress_sensor_ == nullptr ? "no" : "yes");
 }
 
+void BaseballTracker::set_team_id_and_refresh(int team_id) {
+  if (team_id <= 0) {
+    return;
+  }
+  if (team_id_ == team_id) {
+    return;
+  }
+
+  ESP_LOGI(TAG, "Team changed: %d → %d (refresh now)", team_id_, team_id);
+  team_id_ = team_id;
+  last_mlb_status_log_ms_ = 0;
+
+  first_poll_done_ = false;
+  last_poll_ms_ = 0;
+  bool ok = fetch_game_data_();
+  last_poll_ms_ = millis();
+  if (ok) {
+    first_poll_done_ = true;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // HTTP fetch
 // ---------------------------------------------------------------------------
 
-void BaseballTracker::fetch_game_data_() {
+bool BaseballTracker::fetch_game_data_() {
   char path[128];
   snprintf(path, sizeof(path), MLB_SCHEDULE_PATH, team_id_);
 
@@ -100,7 +124,7 @@ void BaseballTracker::fetch_game_data_() {
   if (code != 200) {
     ESP_LOGW(TAG, "HTTP GET failed after %u ms: code=%d", elapsed, code);
     http.end();
-    return;
+    return false;
   }
 
   std::string body = http.getString().c_str();
@@ -110,12 +134,104 @@ void BaseballTracker::fetch_game_data_() {
 
   if (!parse_response_(body)) {
     ESP_LOGW(TAG, "Failed to parse MLB API response (body_len=%u)", (unsigned)body.size());
+    return false;
   }
+
+  uint32_t now_ms = millis();
+  if (state_.phase != GamePhase::LIVE || (now_ms - last_mlb_status_log_ms_) >= 30000) {
+    ESP_LOGI(TAG, "MLB: gamePk=%d %s @ %s phase=%d (%s)", state_.game_pk, state_.away_abbrev.c_str(),
+             state_.home_abbrev.c_str(), (int) state_.phase, state_.detailed_state.c_str());
+    last_mlb_status_log_ms_ = now_ms;
+  }
+  return true;
 }
 
 // ---------------------------------------------------------------------------
 // JSON parsing
 // ---------------------------------------------------------------------------
+
+// Prefer LIVE, else earliest-start PREVIEW, else latest FINAL (first games[] entry is often
+// an earlier completed game when a doubleheader or split squad day exists).
+static JsonObject pick_schedule_game(JsonArray dates) {
+  if (dates.isNull() || dates.size() == 0) {
+    return JsonObject();
+  }
+
+  JsonObject any_live;
+  JsonObject best_preview;
+  time_t preview_start = 0;
+  bool have_preview = false;
+
+  JsonObject best_final;
+  time_t final_start = 0;
+  int final_pk = 0;
+  bool have_final = false;
+
+  for (JsonVariant date_var : dates) {
+    JsonObject date_obj = date_var.as<JsonObject>();
+    JsonArray games = date_obj["games"];
+    if (games.isNull()) {
+      continue;
+    }
+    for (JsonVariant game_var : games) {
+      JsonObject g = game_var.as<JsonObject>();
+      if (g.isNull()) {
+        continue;
+      }
+
+      const char *abs = g["status"]["abstractGameState"] | "";
+      if (strcmp(abs, "Live") == 0) {
+        if (any_live.isNull()) {
+          any_live = g;
+        }
+        continue;
+      }
+      if (strcmp(abs, "Final") == 0) {
+        const char *gd = g["gameDate"] | "";
+        time_t t = 0;
+        BaseballTracker::parse_iso8601_utc(gd, &t);
+        int pk = g["gamePk"] | 0;
+        if (!have_final || t > final_start || (t == final_start && pk > final_pk)) {
+          best_final = g;
+          final_start = t;
+          final_pk = pk;
+          have_final = true;
+        }
+        continue;
+      }
+      // Preview / other non-final (scheduled, warmup as preview, etc.)
+      {
+        const char *gd = g["gameDate"] | "";
+        time_t t = 0;
+        BaseballTracker::parse_iso8601_utc(gd, &t);
+        if (!have_preview) {
+          best_preview = g;
+          preview_start = t;
+          have_preview = true;
+        } else if (t > 0 && (preview_start == 0 || t < preview_start)) {
+          best_preview = g;
+          preview_start = t;
+        }
+      }
+    }
+  }
+
+  if (!any_live.isNull()) {
+    return any_live;
+  }
+  if (have_preview) {
+    return best_preview;
+  }
+  if (have_final) {
+    return best_final;
+  }
+
+  JsonArray g0 = dates[0]["games"].as<JsonArray>();
+  if (!g0.isNull() && g0.size() > 0) {
+    return g0[0].as<JsonObject>();
+  }
+  return JsonObject();
+}
 
 bool BaseballTracker::parse_response_(const std::string &json_body) {
   // Snapshot current state so we can log only what changed
@@ -140,11 +256,10 @@ bool BaseballTracker::parse_response_(const std::string &json_body) {
       return true;
     }
 
-    // Pick the first game of the first date (today's game)
-    JsonObject game = dates[0]["games"][0];
+    JsonObject game = pick_schedule_game(dates);
     if (game.isNull()) {
       state_.phase = GamePhase::NONE;
-      ESP_LOGW(TAG, "Games array unexpectedly empty");
+      ESP_LOGW(TAG, "No selectable game in schedule response");
       return true;
     }
 
@@ -362,6 +477,14 @@ void BaseballTracker::draw_live_() {
       snprintf(label_buf, sizeof(label_buf), "%s %d", prefix, state_.inning);
     }
     draw_centered_text_(40, 88, kRow1Y, label_buf, kYellow());
+
+    //also reset the count and runners when in intermission
+    state_.balls = 0;
+    state_.strikes = 0;
+    state_.outs = 0;
+    state_.runner_first = state_.runner_second = state_.runner_third = false;
+    // state_.batter_last.clear();
+    // state_.pitcher_last.clear();
   } else {
     // Show "▲ 3rd" or "▼ 2nd"; arrow next to the batting team
     char inn_buf[8];
@@ -550,6 +673,135 @@ void BaseballTracker::update_game_in_progress_sensor_() {
   game_in_progress_sensor_->publish_state(live);
   last_published_in_progress_ = live;
   in_progress_sensor_published_ = true;
+}
+
+// ---------------------------------------------------------------------------
+// HA team select
+// ---------------------------------------------------------------------------
+
+static const TeamSelect::TeamOpt kMlbTeams[] = {
+    {"Arizona Diamondbacks", 109},
+    {"Atlanta Braves", 144},
+    {"Baltimore Orioles", 110},
+    {"Boston Red Sox", 111},
+    {"Chicago Cubs", 112},
+    {"Chicago White Sox", 145},
+    {"Cincinnati Reds", 113},
+    {"Cleveland Guardians", 114},
+    {"Colorado Rockies", 115},
+    {"Detroit Tigers", 116},
+    {"Houston Astros", 117},
+    {"Kansas City Royals", 118},
+    {"Los Angeles Angels", 108},
+    {"Los Angeles Dodgers", 119},
+    {"Miami Marlins", 146},
+    {"Milwaukee Brewers", 158},
+    {"Minnesota Twins", 142},
+    {"New York Mets", 121},
+    {"New York Yankees", 147},
+    {"Oakland Athletics", 133},
+    {"Philadelphia Phillies", 143},
+    {"Pittsburgh Pirates", 134},
+    {"San Diego Padres", 135},
+    {"San Francisco Giants", 137},
+    {"Seattle Mariners", 136},
+    {"St. Louis Cardinals", 138},
+    {"Tampa Bay Rays", 139},
+    {"Texas Rangers", 140},
+    {"Toronto Blue Jays", 141},
+    {"Washington Nationals", 120},
+};
+
+const TeamSelect::TeamOpt *TeamSelect::find_by_name_(const std::string &name) {
+  for (const auto &t : kMlbTeams) {
+    if (name == t.name) {
+      return &t;
+    }
+  }
+  return nullptr;
+}
+
+const TeamSelect::TeamOpt *TeamSelect::find_by_id_(int team_id) {
+  for (const auto &t : kMlbTeams) {
+    if (team_id == t.team_id) {
+      return &t;
+    }
+  }
+  return nullptr;
+}
+
+void TeamSelect::setup() {
+  this->traits.set_options({
+      "Arizona Diamondbacks",
+      "Atlanta Braves",
+      "Baltimore Orioles",
+      "Boston Red Sox",
+      "Chicago Cubs",
+      "Chicago White Sox",
+      "Cincinnati Reds",
+      "Cleveland Guardians",
+      "Colorado Rockies",
+      "Detroit Tigers",
+      "Houston Astros",
+      "Kansas City Royals",
+      "Los Angeles Angels",
+      "Los Angeles Dodgers",
+      "Miami Marlins",
+      "Milwaukee Brewers",
+      "Minnesota Twins",
+      "New York Mets",
+      "New York Yankees",
+      "Oakland Athletics",
+      "Philadelphia Phillies",
+      "Pittsburgh Pirates",
+      "San Diego Padres",
+      "San Francisco Giants",
+      "Seattle Mariners",
+      "St. Louis Cardinals",
+      "Tampa Bay Rays",
+      "Texas Rangers",
+      "Toronto Blue Jays",
+      "Washington Nationals",
+  });
+
+  if (restore_value_) {
+    pref_ = global_preferences->make_preference<int>(this->get_object_id_hash());
+    pref_ready_ = true;
+    int saved_team_id = 0;
+    if (pref_.load(&saved_team_id) && saved_team_id > 0 && tracker_ != nullptr) {
+      tracker_->set_team_id(saved_team_id);
+      if (auto *found = find_by_id_(saved_team_id)) {
+        this->publish_state(found->name);
+        return;
+      }
+    }
+  }
+
+  // Publish an initial state that matches the current configured team_id (best effort),
+  // otherwise fall back to the first option.
+  if (tracker_ != nullptr) {
+    if (auto *found = find_by_id_(tracker_->get_team_id())) {
+      this->publish_state(found->name);
+      return;
+    }
+  }
+  this->publish_state(kMlbTeams[0].name);
+}
+
+void TeamSelect::control(const std::string &value) {
+  // Always publish the option HA picked.
+  this->publish_state(value);
+
+  if (tracker_ == nullptr) {
+    return;
+  }
+  if (auto *found = find_by_name_(value)) {
+    if (restore_value_ && pref_ready_) {
+      int id = found->team_id;
+      pref_.save(&id);
+    }
+    tracker_->set_team_id_and_refresh(found->team_id);
+  }
 }
 
 }  // namespace baseball_tracker

@@ -5,10 +5,12 @@
 
 #include "esphome/core/component.h"
 #include "esphome/core/color.h"
+#include "esphome/core/preferences.h"
 #include "esphome/components/display/display.h"
 #include "esphome/components/font/font.h"
 #include "esphome/components/binary_sensor/binary_sensor.h"
 #include "esphome/components/switch/switch.h"
+#include "esphome/components/select/select.h"
 #include "esphome/components/time/real_time_clock.h"
 
 namespace esphome {
@@ -82,6 +84,9 @@ class BaseballTracker : public Component {
   // Called from the display page lambda
   void draw_game();
 
+  // Current configured MLB teamId
+  int get_team_id() const { return team_id_; }
+
   // Setters called from generated code
   void set_display(display::Display *display) { display_ = display; }
   void set_font(font::Font *font) { font_ = font; }
@@ -92,6 +97,11 @@ class BaseballTracker : public Component {
   void set_auto_page_lead_sec(uint32_t s) { auto_page_lead_sec_ = s; }
   void set_baseball_page_switch(switch_::Switch *s) { baseball_page_switch_ = s; }
   void set_game_in_progress_sensor(binary_sensor::BinarySensor *s) { game_in_progress_sensor_ = s; }
+
+  // Used by the HA team select: set team id and repoll immediately.
+  void set_team_id_and_refresh(int team_id);
+
+  static bool parse_iso8601_utc(const char *iso, time_t *out);
 
  protected:
   // ---- drawing helpers ----
@@ -114,9 +124,9 @@ class BaseballTracker : public Component {
   void draw_text_max_width_(int x, int y, int max_width_px, const char *text, Color color);
 
   // ---- data fetching ----
-  void fetch_game_data_();
+  // Returns true on HTTP 200 and successful JSON parse.
+  bool fetch_game_data_();
   bool parse_response_(const std::string &json_body);
-  static bool parse_iso8601_utc(const char *iso, time_t *out);
   // Auto baseball page: on from (first pitch − lead) through until Final / no game
   void try_auto_baseball_page_();
   bool should_auto_show_baseball_() const;
@@ -132,6 +142,7 @@ class BaseballTracker : public Component {
 
   uint32_t last_poll_ms_{0};
   bool first_poll_done_{false};
+  uint32_t last_mlb_status_log_ms_{0};
 
   // Auto page (T−N before first pitch through end of play)
   bool auto_baseball_page_{false};
@@ -175,6 +186,29 @@ class BaseballTracker : public Component {
   // Dot geometry (outs indicator, line 3)
   static constexpr int kDotR    = 3;  // dot radius in pixels
   static constexpr int kDotStep = 8;  // pixel spacing between dot centers
+};
+
+class TeamSelect : public Component, public select::Select {
+ public:
+  struct TeamOpt {
+    const char *name;
+    int team_id;
+  };
+
+  void set_tracker(BaseballTracker *t) { tracker_ = t; }
+  void set_restore_value(bool v) { restore_value_ = v; }
+
+  void setup() override;
+  void control(const std::string &value) override;
+
+ protected:
+  static const TeamOpt *find_by_name_(const std::string &name);
+  static const TeamOpt *find_by_id_(int team_id);
+
+  BaseballTracker *tracker_{nullptr};
+  bool restore_value_{false};
+  ESPPreferenceObject pref_;
+  bool pref_ready_{false};
 };
 
 }  // namespace baseball_tracker
