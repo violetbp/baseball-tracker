@@ -1,0 +1,24 @@
+
+packages:   # as a list
+  - !include local-tracker-base.yaml
+
+
+# Place after `baseball_display_switch` so the id resolves cleanly.
+# ── baseball_tracker ──────────────────────────────────────────────────────
+baseball_tracker:
+  id: baseball
+  team_id: 116 #121 #136  # default/fallback (will be overridden by the dropdown when set)
+  # base_url: "http://10.0.3.29:8080"
+  team_select:
+    name: "MLB Team"
+    restore_value: true
+  poll_interval: 2s
+  font_id: pixolletta
+  # Auto: show the baseball page from 5 min before first pitch; hide after Final
+  # (device clock must be NTP sync’d). Requires baseball_page_switch below.
+  auto_baseball_page: true
+  auto_page_lead: 5min
+  baseball_page_switch: baseball_display_switch
+  game_in_progress:
+    name: "MLB game in progress"
+# ──────────────────────────────────────────────────────────────────────────

@@ -1,10 +1,12 @@
 #include "baseball_tracker.h"
 #include "library.h"
-#include <HTTPClient.h>
-#include <WiFiClientSecure.h>
 #include <ctime>
 #include <cstring>
 #include <strings.h>
+#include <unordered_map>
+#include <lwip/sockets.h>
+#include "esp_http_client.h"
+#include "esphome/components/network/util.h"
 
 #include "esphome/core/log.h"
 #include "esphome/components/json/json_util.h"
@@ -23,12 +25,30 @@ static std::string last_name_from_full_name(const char *full) {
 }
 
 // ---------------------------------------------------------------------------
-// MLB Stats API – single endpoint that returns everything we need.
-// ?hydrate=linescore,team pulls live count, base runners, and team abbrevs.
+// MLB Stats API endpoints.
+//
+// 1. Schedule (discovery): tells us if today has a game, the gamePk, first
+//    pitch, abstract/detailed state. Cheap and works for any team_id.
+//
+// 2. Per-game live feed: richer/fresher data while a game is LIVE. Requires a
+//    known gamePk. We pull only the leaves we need via `fields=` so the
+//    response stays small enough to parse on-device. In particular we keep
+//    `players,useLastName` so we can resolve batter/pitcher names from the
+//    integer id returned in `liveData.linescore.{offense.batter,defense.pitcher}`.
 // ---------------------------------------------------------------------------
-static const char *const MLB_API_HOST = "statsapi.mlb.com";
 static const char *const MLB_SCHEDULE_PATH =
     "/api/v1/schedule?sportId=1&teamId=%d&hydrate=linescore,team";
+
+static const char *const MLB_LIVE_FEED_PATH =
+    "/api/v1.1/game/%d/feed/live?fields="
+    "metaData,timeStamp,gamePk,"
+    "gameData,status,abstractGameState,detailedState,statusCode,"
+    "datetime,dateTime,"
+    "teams,away,home,abbreviation,id,"
+    "players,useLastName,"
+    "liveData,linescore,currentInning,currentInningOrdinal,isTopInning,"
+    "inningHalf,inningState,balls,strikes,outs,runs,"
+    "offense,defense,first,second,third,batter,pitcher";
 
 // ---------------------------------------------------------------------------
 // Component lifecycle
@@ -38,29 +58,69 @@ void BaseballTracker::setup() {
   ESP_LOGCONFIG(TAG, "Setting up Baseball Tracker (team_id=%d)", team_id_);
   // First fetch runs from loop() so we only mark first_poll_done_ after a successful response.
 }
-
 void BaseballTracker::loop() {
   uint32_t now = millis();
-  // After first success: fast poll while LIVE, else 5 min. Before first success: poll_interval only.
-  uint32_t effective_interval = poll_interval_ms_;
-  if (first_poll_done_) {
-    if (state_.phase != GamePhase::LIVE) {
-      effective_interval = 5 * 60 * 1000;  // 5 min when not live
-    }
+
+  if (!esphome::network::is_connected()) {
+    last_schedule_poll_ms_ = 0;
+    last_live_poll_ms_ = 0;
+    wifi_connected_at_ms_ = 0;  // reset holdoff
+    return;
   }
 
-  // last_poll_ms_ == 0: never polled yet (run once right after boot).
-  if (last_poll_ms_ == 0 || (now - last_poll_ms_) >= effective_interval) {
-    ESP_LOGD(TAG, "Polling MLB API (interval=%u ms, phase=%d, first_ok=%s)", effective_interval,
-             (int)state_.phase, first_poll_done_ ? "yes" : "no");
-    bool ok = fetch_game_data_();
-    last_poll_ms_ = now;
+  // Record when we first saw the network come up
+  if (wifi_connected_at_ms_ == 0) {
+    wifi_connected_at_ms_ = now;
+  }
+
+  // Wait 2 seconds after connection before making any HTTP requests.
+  // The TCP/IP stack needs a moment to fully initialize after association.
+  static constexpr uint32_t kNetworkHoldoffMs = 2000;
+  if ((now - wifi_connected_at_ms_) < kNetworkHoldoffMs) {
+    return;
+  }
+
+
+  // Guard: don't attempt HTTP if network isn't up
+  if (!esphome::network::is_connected()) {
+    last_schedule_poll_ms_ = 0;
+    last_live_poll_ms_ = 0;
+    return;
+  }
+
+  // ---- Schedule (discovery) ----
+  static constexpr uint32_t kScheduleSlowMs = 5 * 60 * 1000;
+  uint32_t schedule_interval = first_poll_done_
+      ? kScheduleSlowMs
+      : poll_interval_ms_;
+  bool need_schedule = (last_schedule_poll_ms_ == 0)
+      || ((now - last_schedule_poll_ms_) >= schedule_interval);
+
+  if (need_schedule) {
+    ESP_LOGD(TAG, "Polling schedule (interval=%u ms, phase=%d, first_ok=%s)",
+             schedule_interval, (int)state_.phase, first_poll_done_ ? "yes" : "no");
+    bool ok = fetch_schedule_data_();
+    last_schedule_poll_ms_ = now;
     if (ok) {
       first_poll_done_ = true;
     }
   }
 
-  // 1Hz: auto page + binary_sensor (cheap)
+  // ---- feed/live (fast updates while LIVE) ----
+  bool need_live = first_poll_done_
+      && state_.phase == GamePhase::LIVE
+      && state_.game_pk > 0
+      && (last_live_poll_ms_ == 0
+          || (now - last_live_poll_ms_) >= poll_interval_ms_);
+
+  if (need_live) {
+    ESP_LOGD(TAG, "Polling feed/live (interval=%u ms, gamePk=%d)",
+             poll_interval_ms_, state_.game_pk);
+    fetch_live_feed_(state_.game_pk);
+    last_live_poll_ms_ = now;
+  }
+
+  // 1Hz: auto page + binary_sensor (cheap, no network)
   if (now - last_auto_logic_ms_ >= 1000) {
     last_auto_logic_ms_ = now;
     try_auto_baseball_page_();
@@ -91,49 +151,122 @@ void BaseballTracker::set_team_id_and_refresh(int team_id) {
   last_mlb_status_log_ms_ = 0;
 
   first_poll_done_ = false;
-  last_poll_ms_ = 0;
-  bool ok = fetch_game_data_();
-  last_poll_ms_ = millis();
+  last_schedule_poll_ms_ = 0;
+  last_live_poll_ms_ = 0;
+  bool ok = fetch_schedule_data_();
+  uint32_t now = millis();
+  last_schedule_poll_ms_ = now;
   if (ok) {
     first_poll_done_ = true;
+    // If the new team is already LIVE, kick a feed/live fetch immediately so
+    // the UI doesn't lag a full poll_interval after a switch.
+    if (state_.phase == GamePhase::LIVE && state_.game_pk > 0) {
+      fetch_live_feed_(state_.game_pk);
+      last_live_poll_ms_ = now;
+    }
   }
 }
 
 // ---------------------------------------------------------------------------
-// HTTP fetch
+// HTTP fetch helpers
 // ---------------------------------------------------------------------------
 
-bool BaseballTracker::fetch_game_data_() {
-  char path[128];
-  snprintf(path, sizeof(path), MLB_SCHEDULE_PATH, team_id_);
+namespace {
 
-  ESP_LOGD(TAG, "GET https://%s%s", MLB_API_HOST, path);
+static bool starts_with_(const std::string &s, const char *prefix) {
+  size_t n = strlen(prefix);
+  return s.size() >= n && s.compare(0, n, prefix) == 0;
+}
+
+static std::string join_url_(const std::string &base, const char *path) {
+  if (base.empty()) {
+    return std::string(path);
+  }
+  if (path == nullptr || *path == '\0') {
+    return base;
+  }
+  bool base_slash = base.back() == '/';
+  bool path_slash = *path == '/';
+  if (base_slash && path_slash) {
+    return base + (path + 1);
+  }
+  if (!base_slash && !path_slash) {
+    return base + "/" + path;
+  }
+  return base + path;
+}
+
+// esp_http_client event callback for collecting response body
+static esp_err_t http_event_cb_(esp_http_client_event_t *evt) {
+  std::string *out = (std::string *)evt->user_data;
+  if (evt->event_id == HTTP_EVENT_ON_DATA) {
+    out->append((char *)evt->data, evt->data_len);
+  }
+  return ESP_OK;
+}
+
+// Issue a GET to base_url + path and return the body in `out`.
+// Returns true only on HTTP 200 with a non-empty body.
+bool http_get_json_(const std::string &base_url, const char *path, std::string *out, const char *log_tag) {
+  std::string url = join_url_(base_url, path);
+  ESP_LOGD(log_tag, "GET %s", url.c_str());
   uint32_t t0 = millis();
 
-  WiFiClientSecure client;
-  client.setInsecure();  // matches verify_ssl: false in the firmware
+  esp_http_client_config_t config{};
+  config.url = url.c_str();
+  config.cert_pem = nullptr;
+  config.skip_cert_common_name_check = true;
+  config.timeout_ms = 8000;
+  config.method = HTTP_METHOD_GET;
+  config.event_handler = http_event_cb_;
+  config.user_data = out;
 
-  HTTPClient http;
-  http.begin(client, MLB_API_HOST, 443, path, true);
-  http.setTimeout(8000);
-  http.addHeader("User-Agent", "ESPHome-BaseballTracker/1.0");
-
-  int code = http.GET();
-  uint32_t elapsed = millis() - t0;
-
-  if (code != 200) {
-    ESP_LOGW(TAG, "HTTP GET failed after %u ms: code=%d", elapsed, code);
-    http.end();
+  esp_http_client_handle_t client = esp_http_client_init(&config);
+  if (!client) {
+    ESP_LOGW(log_tag, "Failed to init HTTP client");
     return false;
   }
 
-  std::string body = http.getString().c_str();
-  http.end();
+  esp_http_client_set_header(client, "User-Agent", "ESPHome-BaseballTracker/1.0");
 
-  ESP_LOGD(TAG, "HTTP 200 in %u ms, body=%u bytes", elapsed, (unsigned)body.size());
+  esp_err_t err = esp_http_client_perform(client);
+  if (err != ESP_OK) {
+    ESP_LOGW(log_tag, "HTTP perform failed: %s", esp_err_to_name(err));
+    esp_http_client_cleanup(client);
+    return false;
+  }
 
-  if (!parse_response_(body)) {
-    ESP_LOGW(TAG, "Failed to parse MLB API response (body_len=%u)", (unsigned)body.size());
+  int status_code = esp_http_client_get_status_code(client);
+  uint32_t elapsed = millis() - t0;
+
+  if (status_code != 200) {
+    ESP_LOGW(log_tag, "HTTP GET failed after %u ms: code=%d (url=%s)", elapsed, status_code, url.c_str());
+    esp_http_client_cleanup(client);
+    return false;
+  }
+
+  ESP_LOGD(log_tag, "HTTP 200 in %u ms, body=%u bytes", elapsed, (unsigned) out->size());
+  esp_http_client_cleanup(client);
+  return true;
+}
+
+}  // namespace
+
+// ---------------------------------------------------------------------------
+// Schedule endpoint: discovery (gamePk, first pitch, abstract phase, …).
+// ---------------------------------------------------------------------------
+
+bool BaseballTracker::fetch_schedule_data_() {
+  char path[128];
+  snprintf(path, sizeof(path), MLB_SCHEDULE_PATH, team_id_);
+
+  std::string body;
+  if (!http_get_json_(base_url_, path, &body, TAG)) {
+    return false;
+  }
+
+  if (!parse_schedule_response_(body)) {
+    ESP_LOGW(TAG, "Failed to parse MLB schedule response (body_len=%u)", (unsigned) body.size());
     return false;
   }
 
@@ -233,7 +366,7 @@ static JsonObject pick_schedule_game(JsonArray dates) {
   return JsonObject();
 }
 
-bool BaseballTracker::parse_response_(const std::string &json_body) {
+bool BaseballTracker::parse_schedule_response_(const std::string &json_body) {
   // Snapshot current state so we can log only what changed
   GameState prev = state_;
 
@@ -390,12 +523,202 @@ bool BaseballTracker::parse_response_(const std::string &json_body) {
 }
 
 // ---------------------------------------------------------------------------
-// Public draw entry point
+// feed/live endpoint: rich live state for a known gamePk.
 // ---------------------------------------------------------------------------
 
-void BaseballTracker::draw_game() {
+bool BaseballTracker::fetch_live_feed_(int game_pk) {
+  if (game_pk <= 0) {
+    return false;
+  }
+
+  // Path is long because the fields= leaf-allowlist is baked in. ~480 chars.
+  char path[512];
+  snprintf(path, sizeof(path), MLB_LIVE_FEED_PATH, game_pk);
+
+  std::string body;
+  if (!http_get_json_(base_url_, path, &body, TAG)) {
+    return false;
+  }
+
+  if (!parse_live_feed_response_(body)) {
+    ESP_LOGW(TAG, "Failed to parse feed/live response (gamePk=%d, body_len=%u)", game_pk,
+             (unsigned) body.size());
+    return false;
+  }
+  return true;
+}
+
+bool BaseballTracker::parse_live_feed_response_(const std::string &json_body) {
+  GameState prev = state_;
+
+  return json::parse_json(json_body, [this, &prev](JsonObject root) -> bool {
+    JsonObject game_data = root["gameData"];
+    JsonObject live_data = root["liveData"];
+    if (game_data.isNull() || live_data.isNull()) {
+      ESP_LOGW(TAG, "feed/live: missing gameData or liveData");
+      return false;
+    }
+
+    // ----- gameData.status -----
+    {
+      JsonObject status = game_data["status"];
+      const char *abstract_state = status["abstractGameState"] | "";
+      const char *detailed_state = status["detailedState"]     | "";
+      if (detailed_state[0] != '\0') {
+        state_.detailed_state = detailed_state;
+      }
+      // Honor a FINAL transition from feed/live so we stop fast-polling sooner
+      // than the next 5-min schedule refresh.
+      if (strcmp(abstract_state, "Final") == 0 && state_.phase != GamePhase::FINAL) {
+        ESP_LOGI(TAG, "feed/live reports Final (gamePk=%d)", state_.game_pk);
+        state_.phase = GamePhase::FINAL;
+      }
+    }
+
+    // ----- gameData.teams.{away,home}.abbreviation -----
+    JsonObject teams = game_data["teams"];
+    if (!teams.isNull()) {
+      const char *aw = teams["away"]["abbreviation"] | "";
+      const char *hm = teams["home"]["abbreviation"] | "";
+      if (aw[0] != '\0') state_.away_abbrev = aw;
+      if (hm[0] != '\0') state_.home_abbrev = hm;
+    }
+
+    // ----- gameData.players: id -> useLastName lookup -----
+    // Keys look like "ID643338"; we key the map by the integer id leaf so the
+    // batter/pitcher resolution below doesn't depend on the prefix string.
+    std::unordered_map<int, std::string> player_last;
+    JsonObject players = game_data["players"];
+    if (!players.isNull()) {
+      for (JsonPair kv : players) {
+        JsonObject p = kv.value().as<JsonObject>();
+        if (p.isNull()) {
+          continue;
+        }
+        int pid = p["id"] | 0;
+        const char *last = p["useLastName"] | "";
+        if (pid > 0 && last[0] != '\0') {
+          player_last.emplace(pid, std::string(last));
+        }
+      }
+      ESP_LOGV(TAG, "feed/live: built player map with %u entries", (unsigned) player_last.size());
+    }
+
+    auto resolve_last = [&player_last](int id) -> std::string {
+      if (id <= 0) return std::string();
+      auto it = player_last.find(id);
+      return it == player_last.end() ? std::string() : it->second;
+    };
+
+    // ----- liveData.linescore -----
+    JsonObject ls = live_data["linescore"];
+    if (ls.isNull()) {
+      ESP_LOGD(TAG, "feed/live: no linescore");
+      return true;
+    }
+
+    state_.inning         = ls["currentInning"] | state_.inning;
+    state_.inning_ordinal = ls["currentInningOrdinal"] | state_.inning_ordinal.c_str();
+    state_.is_top_inning  = ls["isTopInning"] | state_.is_top_inning;
+    state_.balls          = ls["balls"]   | 0;
+    state_.strikes        = ls["strikes"] | 0;
+    state_.outs           = ls["outs"]    | 0;
+
+    // Score lives under linescore.teams in the live feed (vs game-level teams.score
+    // in the schedule).
+    JsonObject ls_teams = ls["teams"];
+    if (!ls_teams.isNull()) {
+      state_.away_score = ls_teams["away"]["runs"] | state_.away_score;
+      state_.home_score = ls_teams["home"]["runs"] | state_.home_score;
+    }
+
+    // Runners on base + current batter id
+    int batter_id = 0;
+    JsonObject offense = ls["offense"];
+    if (!offense.isNull()) {
+      state_.runner_first  = !offense["first"].isNull();
+      state_.runner_second = !offense["second"].isNull();
+      state_.runner_third  = !offense["third"].isNull();
+      batter_id = offense["batter"]["id"] | 0;
+    } else {
+      state_.runner_first = state_.runner_second = state_.runner_third = false;
+    }
+
+    int pitcher_id = 0;
+    JsonObject defense = ls["defense"];
+    if (!defense.isNull()) {
+      pitcher_id = defense["pitcher"]["id"] | 0;
+    }
+
+    state_.batter_last  = resolve_last(batter_id);
+    state_.pitcher_last = resolve_last(pitcher_id);
+
+    // Inning state ("Middle" / "End" between half-innings)
+    const char *inning_state = ls["inningState"] | "";
+    state_.inning_intermission = InningIntermissionKind::NONE;
+    if (strcasecmp(inning_state, "Middle") == 0) {
+      state_.inning_intermission = InningIntermissionKind::MIDDLE;
+    } else if (strcasecmp(inning_state, "End") == 0) {
+      state_.inning_intermission = InningIntermissionKind::END;
+    }
+    if (state_.inning_intermission != InningIntermissionKind::NONE) {
+      state_.outs = 0;
+      state_.batter_last.clear();
+      state_.runner_first = state_.runner_second = state_.runner_third = false;
+    }
+
+    if (state_.away_score != prev.away_score || state_.home_score != prev.home_score) {
+      ESP_LOGI(TAG, "Score update (live): %s %d, %s %d", state_.away_abbrev.c_str(), state_.away_score,
+               state_.home_abbrev.c_str(), state_.home_score);
+    }
+
+    if (state_.inning != prev.inning || state_.is_top_inning != prev.is_top_inning ||
+        state_.inning_intermission != prev.inning_intermission) {
+      if (state_.inning_intermission == InningIntermissionKind::MIDDLE) {
+        ESP_LOGI(TAG, "Inning: Mid %s", state_.inning_ordinal.c_str());
+      } else if (state_.inning_intermission == InningIntermissionKind::END) {
+        ESP_LOGI(TAG, "Inning: End %s", state_.inning_ordinal.c_str());
+      } else {
+        ESP_LOGI(TAG, "Inning: %s %s (%d outs)", state_.is_top_inning ? "Top" : "Bottom",
+                 state_.inning_ordinal.c_str(), state_.outs);
+      }
+    }
+
+    ESP_LOGD(TAG, "feed/live: %s @ %s %d-%d  %s%s  B%d S%d O%d  bases:[%s%s%s]  P:%s AB:%s",
+             state_.away_abbrev.c_str(), state_.home_abbrev.c_str(), state_.away_score, state_.home_score,
+             state_.is_top_inning ? "T" : "B", state_.inning_ordinal.c_str(),
+             state_.balls, state_.strikes, state_.outs,
+             state_.runner_first  ? "1" : "-",
+             state_.runner_second ? "2" : "-",
+             state_.runner_third  ? "3" : "-",
+             state_.pitcher_last.empty() ? "--" : state_.pitcher_last.c_str(),
+             state_.batter_last.empty()  ? "--" : state_.batter_last.c_str());
+
+    return true;
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Public draw entry point
+// ---------------------------------------------------------------------------
+void HOT BaseballTracker::draw_game() {
   if (display_ == nullptr || font_ == nullptr) {
     ESP_LOGW(TAG, "draw_game() called but display or font is not set");
+    return;
+  }
+
+  if (!esphome::network::is_connected()) {
+    draw_centered_text_(0, 128, kRow2Y, "Waiting for network", kYellow());
+    return;
+  }
+
+  if (!this->rtc_->now().is_valid()) {
+    draw_centered_text_(0, 128, kRow2Y, "Waiting for time sync", kYellow());
+    return;
+  }
+
+  if (!first_poll_done_) {
+    draw_centered_text_(0, 128, kRow2Y, "Loading...", kDim());
     return;
   }
 
@@ -408,7 +731,6 @@ void BaseballTracker::draw_game() {
     case GamePhase::FINAL:   draw_final_();    break;
   }
 }
-
 // ---------------------------------------------------------------------------
 // Drawing: no game today
 // ---------------------------------------------------------------------------

@@ -17,6 +17,9 @@
             pkgs.platformio-core
             pkgs.python3
             pkgs.python3Packages.pyserial
+            pkgs.python3Packages.fastapi # some of these are for the replay server
+            pkgs.python3Packages.uvicorn
+            pkgs.python3Packages.httpx
             pkgs.esptool
           ];
 

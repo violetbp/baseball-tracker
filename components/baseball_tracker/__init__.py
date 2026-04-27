@@ -30,6 +30,7 @@ CONF_AUTO_PAGE_LEAD = "auto_page_lead"
 CONF_BASEBALL_PAGE_SWITCH = "baseball_page_switch"
 CONF_GAME_IN_PROGRESS = "game_in_progress"
 CONF_TEAM_SELECT = "team_select"
+CONF_BASE_URL = "base_url"
 
 _MARINERS_TEAM_ID = 136
 
@@ -87,6 +88,9 @@ CONFIG_SCHEMA = cv.All(
             cv.GenerateID(CONF_TIME_ID): cv.use_id(RealTimeClock),
             cv.Optional(CONF_TEAM_ID, default=_MARINERS_TEAM_ID): cv.positive_int,
             cv.Optional(CONF_POLL_INTERVAL, default="30s"): cv.positive_time_period_milliseconds,
+            # Override the MLB API host for testing (e.g. http://10.0.3.29:8080).
+            # Default is the real MLB Stats API.
+            cv.Optional(CONF_BASE_URL, default="https://statsapi.mlb.com"): cv.url,
             cv.Optional(CONF_AUTO_BASEBALL_PAGE, default=False): cv.boolean,
             cv.Optional(CONF_AUTO_PAGE_LEAD, default="5min"): cv.positive_time_period,
             cv.Optional(CONF_BASEBALL_PAGE_SWITCH): cv.use_id(sw.Switch),
@@ -117,6 +121,7 @@ async def to_code(config):
 
     cg.add(var.set_team_id(config[CONF_TEAM_ID]))
     cg.add(var.set_poll_interval(config[CONF_POLL_INTERVAL]))
+    cg.add(var.set_base_url(config[CONF_BASE_URL]))
 
     cg.add(var.set_auto_baseball_page(config[CONF_AUTO_BASEBALL_PAGE]))
     lead = config[CONF_AUTO_PAGE_LEAD]
@@ -140,7 +145,3 @@ async def to_code(config):
         await select.register_select(sel, sel_conf, options=_MLB_TEAM_OPTIONS)
 
     await cg.register_component(var, config)
-
-    cg.add_library("HTTPClient", None)
-    cg.add_library("NetworkClientSecure", None)
-    cg.add_library("WiFi", None)

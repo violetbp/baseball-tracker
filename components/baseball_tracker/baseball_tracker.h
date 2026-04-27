@@ -30,7 +30,6 @@ enum class InningIntermissionKind {
   MIDDLE,  // between top and bottom of the same inning
   END,     // inning complete, before next half-inning / next inning
 };
-
 struct GameState {
   GamePhase phase{GamePhase::NONE};
 
@@ -93,6 +92,7 @@ class BaseballTracker : public Component {
   void set_rtc(time::RealTimeClock *rtc) { rtc_ = rtc; }
   void set_team_id(int team_id) { team_id_ = team_id; }
   void set_poll_interval(uint32_t interval_ms) { poll_interval_ms_ = interval_ms; }
+  void set_base_url(const std::string &url) { base_url_ = url; }
   void set_auto_baseball_page(bool e) { auto_baseball_page_ = e; }
   void set_auto_page_lead_sec(uint32_t s) { auto_page_lead_sec_ = s; }
   void set_baseball_page_switch(switch_::Switch *s) { baseball_page_switch_ = s; }
@@ -124,9 +124,18 @@ class BaseballTracker : public Component {
   void draw_text_max_width_(int x, int y, int max_width_px, const char *text, Color color);
 
   // ---- data fetching ----
-  // Returns true on HTTP 200 and successful JSON parse.
-  bool fetch_game_data_();
-  bool parse_response_(const std::string &json_body);
+  // Schedule endpoint: drives discovery (gamePk, first pitch, "no game today",
+  // PREVIEW/FINAL detection). Polled slowly when not LIVE, periodically while
+  // LIVE just to catch the FINAL transition.
+  bool fetch_schedule_data_();
+  bool parse_schedule_response_(const std::string &json_body);
+
+  // Per-game live feed: drives the live UI (count, runners, inning state,
+  // batter/pitcher names). Only called once we know a gamePk and the schedule
+  // says we're LIVE.
+  bool fetch_live_feed_(int game_pk);
+  bool parse_live_feed_response_(const std::string &json_body);
+
   // Auto baseball page: on from (first pitch − lead) through until Final / no game
   void try_auto_baseball_page_();
   bool should_auto_show_baseball_() const;
@@ -137,10 +146,15 @@ class BaseballTracker : public Component {
   font::Font *font_{nullptr};
   time::RealTimeClock *rtc_{nullptr};
 
+  uint32_t wifi_connected_at_ms_{0};
   int team_id_{136};
   uint32_t poll_interval_ms_{30000};
+  std::string base_url_{"https://statsapi.mlb.com"};
 
-  uint32_t last_poll_ms_{0};
+  // Two independent cadences: schedule (discovery, slow) and feed/live (fast,
+  // only while LIVE).
+  uint32_t last_schedule_poll_ms_{0};
+  uint32_t last_live_poll_ms_{0};
   bool first_poll_done_{false};
   uint32_t last_mlb_status_log_ms_{0};
 
