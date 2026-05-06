@@ -142,7 +142,7 @@
     const kDiamondOutPadding = 5;  // gap between diamond and first out dot
     const kRow2RightX = 126;      // B–S right edge
     const kLiveBatterNameMaxW = 68;  // baseball_tracker.h
-    const d13x = 7, basePad = 2;  // must match draw_bases_
+    const d13x = 8, basePad = 2;  // must match draw_bases_ / draw_live d13x
     const kDiamondRight = d13x + basePad;
     const kDotR      = 3;  // baseball_tracker.h
     const kDotStep   = 8;
@@ -235,11 +235,11 @@
 
     // Mirrors draw_bases_(cx, cy) — enlarged 5×5 base pads, full infield outline
     function drawBases(cx, cy, state) {
-      const d2y = -7, d13x = 7, d13y = 3, homey = 5, pad = 2;
-      const x2 = cx, y2 = cy + d2y;
-      const x3 = cx - d13x, y3 = cy + d13y;
-      const x1 = cx + d13x, y1 = cy + d13y;
-      const xh = cx, yh = cy + homey;
+      const d = 8, pad = 2;
+      const x2 = cx, y2 = cy - d;
+      const x3 = cx - d, y3 = cy;
+      const x1 = cx + d, y1 = cy;
+      const xh = cx, yh = cy + d;
 
       ctx.strokeStyle = C_DIM;
       ctx.lineWidth = 0.75;
@@ -251,9 +251,9 @@
       ctx.stroke();
 
       const bases = [
-        { dx: 0,      dy: d2y,  occupied: state.runner_second },
-        { dx: -d13x, dy: d13y, occupied: state.runner_third  },
-        { dx: d13x,  dy: d13y, occupied: state.runner_first  },
+        { dx: 0,   dy: -d, occupied: state.runner_second },
+        { dx: -d,  dy: 0,  occupied: state.runner_third  },
+        { dx: d,   dy: 0,  occupied: state.runner_first  },
       ];
       for (const b of bases) {
         const bx = cx + b.dx;

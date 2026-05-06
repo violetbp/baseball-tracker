@@ -39,7 +39,16 @@ OUT_DIR="${3:-./mlb_live_${GAME_PK}}"
 INTERVAL=10
 SCHEDULE_INTERVAL=30  # re-check schedule every N seconds
 
-FIELDS="metaData,timeStamp,wait,gamePk,gameData,status,abstractGameState,detailedState,teams,away,home,name,id,liveData,linescore,currentInning,currentInningOrdinal,inningHalf,isTopInning,outs,teams,runs,offense,first,second,third,batter,pitcher,plays,currentPlay,matchup,batter,useLastName,pitcher,useLastName,count,balls,strikes,outs"
+FIELDS="metaData,timeStamp,wait,gamePk,
+liveData,plays,currentPlay,result,description,about,isScoringPlay,isComplete,count,balls,strikes,outs,matchup,batter,id,pitcher,id,
+playEvents,hitData,launchSpeed,totalDistance,trajectory,
+gameData,status,abstractGameState,detailedState,
+players,id,useLastName"
+
+#gameData,status,abstractGameState,detailedState,teams,away,home,name,id,liveData,linescore,currentInning,currentInningOrdinal,inningHalf,isTopInning,outs,teams,runs,offense,first,second,third,batter,pitcher,plays,currentPlay,matchup,batter,useLastName,pitcher,useLastName,count,balls,strikes,outs"
+
+
+
 
 BASE="https://statsapi.mlb.com/api/v1.1/game/${GAME_PK}/feed/live?fields=${FIELDS}"
 SCHEDULE_URL="https://statsapi.mlb.com/api/v1/schedule?sportId=1&teamId=${TEAM_ID}&hydrate=linescore,team"

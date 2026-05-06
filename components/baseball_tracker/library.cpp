@@ -58,6 +58,7 @@ char *to_upper(const char *in, char *out, std::size_t out_size) {
 
 // ---------------------------------------------------------------------------
 // Helper: draw a row of filled/hollow dots
+// filled can be higher than count
 // ---------------------------------------------------------------------------
 
 int BaseballTracker::draw_dots_(int x, int y, int count, int filled, Color on_color, Color off_color) {

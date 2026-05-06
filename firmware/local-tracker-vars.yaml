@@ -7,7 +7,7 @@ packages:   # as a list
 # ── baseball_tracker ──────────────────────────────────────────────────────
 baseball_tracker:
   id: baseball
-  team_id: 116 #121 #136  # default/fallback (will be overridden by the dropdown when set)
+  team_id: 136 #116 #121 # # default/fallback (will be overridden by the dropdown when set)
   # base_url: "http://10.0.3.29:8080"
   team_select:
     name: "MLB Team"
@@ -17,6 +17,7 @@ baseball_tracker:
   # Auto: show the baseball page from 5 min before first pitch; hide after Final
   # (device clock must be NTP sync’d). Requires baseball_page_switch below.
   auto_baseball_page: true
+  auto_page_post_final: 5min   # default; set to 0s to disable post-final hold
   auto_page_lead: 5min
   baseball_page_switch: baseball_display_switch
   game_in_progress:

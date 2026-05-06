@@ -27,6 +27,7 @@ CONF_TEAM_ID = "team_id"
 CONF_POLL_INTERVAL = "poll_interval"
 CONF_AUTO_BASEBALL_PAGE = "auto_baseball_page"
 CONF_AUTO_PAGE_LEAD = "auto_page_lead"
+CONF_AUTO_PAGE_POST_FINAL = "auto_page_post_final"
 CONF_BASEBALL_PAGE_SWITCH = "baseball_page_switch"
 CONF_GAME_IN_PROGRESS = "game_in_progress"
 CONF_TEAM_SELECT = "team_select"
@@ -93,6 +94,7 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_BASE_URL, default="https://statsapi.mlb.com"): cv.url,
             cv.Optional(CONF_AUTO_BASEBALL_PAGE, default=False): cv.boolean,
             cv.Optional(CONF_AUTO_PAGE_LEAD, default="5min"): cv.positive_time_period,
+            cv.Optional(CONF_AUTO_PAGE_POST_FINAL, default="5min"): cv.positive_time_period,
             cv.Optional(CONF_BASEBALL_PAGE_SWITCH): cv.use_id(sw.Switch),
             cv.Optional(CONF_GAME_IN_PROGRESS): binary_sensor.binary_sensor_schema(
                 device_class="running"
@@ -127,6 +129,10 @@ async def to_code(config):
     lead = config[CONF_AUTO_PAGE_LEAD]
     lead_sec = max(0, int(lead.total_milliseconds // 1000))
     cg.add(var.set_auto_page_lead_sec(lead_sec))
+
+    post_final = config[CONF_AUTO_PAGE_POST_FINAL]
+    post_final_sec = max(0, int(post_final.total_milliseconds // 1000))
+    cg.add(var.set_auto_page_post_final_sec(post_final_sec))
 
     if config.get(CONF_BASEBALL_PAGE_SWITCH):
         swi = await cg.get_variable(config[CONF_BASEBALL_PAGE_SWITCH])

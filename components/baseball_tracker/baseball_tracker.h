@@ -95,6 +95,7 @@ class BaseballTracker : public Component {
   void set_base_url(const std::string &url) { base_url_ = url; }
   void set_auto_baseball_page(bool e) { auto_baseball_page_ = e; }
   void set_auto_page_lead_sec(uint32_t s) { auto_page_lead_sec_ = s; }
+  void set_auto_page_post_final_sec(uint32_t s) { auto_page_post_final_sec_ = s; }
   void set_baseball_page_switch(switch_::Switch *s) { baseball_page_switch_ = s; }
   void set_game_in_progress_sensor(binary_sensor::BinarySensor *s) { game_in_progress_sensor_ = s; }
 
@@ -161,6 +162,9 @@ class BaseballTracker : public Component {
   // Auto page (T−N before first pitch through end of play)
   bool auto_baseball_page_{false};
   uint32_t auto_page_lead_sec_{300};
+  uint32_t auto_page_post_final_sec_{300};
+  /// UTC epoch when we observed LIVE→FINAL for the current game; 0 = no post-final window.
+  time_t final_at_utc_{0};
   switch_::Switch *baseball_page_switch_{nullptr};
   bool last_auto_show_cmd_{false};
   uint32_t last_auto_logic_ms_{0};
@@ -191,11 +195,11 @@ class BaseballTracker : public Component {
   // before the first out dot.
   static constexpr int kOutDotsY  = 24;  // vertical center of out circles
   static constexpr int kDiamondCY = 20;  // draw_bases_ centre (1st/3rd sit at kOutDotsY)
-  static constexpr int kOutsFirstX  = 100;  // x of leftmost out-dot centre (group toward right edge)
+  static constexpr int kOutsFirstX  = 115;  // x of leftmost out-dot centre (group toward right edge)
   static constexpr int kDiamondOutPadding  = 5;  // min px gap between diamond and first out dot
   static constexpr int kRow2RightX = 126;  // B–S count right-align edge (see draw_right_aligned)
   // Live: batter line stays left of the infield graphic (see draw_text_max_width_)
-  static constexpr int kLiveBatterNameMaxW = 68;
+  static constexpr int kLiveBatterNameMaxW = 68+15;
 
   // Dot geometry (outs indicator, line 3)
   static constexpr int kDotR    = 3;  // dot radius in pixels
