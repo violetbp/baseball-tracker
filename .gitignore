@@ -9,3 +9,10 @@ firmware/fonts/
 components/baseball_tracker/__pycache__/
 mlb_data/
 mlb_live_*
+backup/*
+simulate/bin
+simulate/build
+deps/
+imgui.ini
+simulate/imgui.ini
+.opencode/

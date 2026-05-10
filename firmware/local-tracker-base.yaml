@@ -43,7 +43,7 @@ external_components:
   # ──────────────────────────────────────────────────────────────────────────
 
 logger:
-  level: DEBUG
+  level: INFO
 
 
 http_request:
@@ -390,17 +390,17 @@ display:
 
           auto ip_addresses = ::esphome::network::get_ip_addresses();
           if (ip_addresses.empty()) {
-            it.printf(x, y, id(pixolletta), COLOR_ON, TextAlign::CENTER, "No IP Address");
+            it.printf(x, y, id(pixolletta8px), COLOR_ON, TextAlign::CENTER, "No IP Address");
             return;
           }
 
           char ip_address[esphome::network::IP_ADDRESS_BUFFER_SIZE];
           ip_addresses[0].str_to(ip_address);
-          it.printf(x, y, id(pixolletta), COLOR_ON, TextAlign::CENTER, "%s", ip_address);
+          it.printf(x, y, id(pixolletta8px), COLOR_ON, TextAlign::CENTER, "%s", ip_address);
 
 font:
-  - file: "fonts/Pixolletta8px.ttf"
-    id: pixolletta
+  - file: "fonts/Pixolletta8px-mono-1.ttf"
+    id: pixolletta8px_edit
     size: 10
     glyphs:
       - abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,:;!?()"'-+/*=%@#[]{}<>|&^~
@@ -410,6 +410,7 @@ font:
       - file: "fonts/bedstead.otf"
         glyphs: 
           - "▲▼" #―
+
   - file: "fonts/CozetteVector.ttf"
     id: CozetteVector
     size: 10
@@ -418,13 +419,13 @@ font:
       # - ÄËÏÖÜÉÈÔäëïöüéèôŊŋÁÊÎÛÝáêîûýĜĝÀÌÒàìòÑñÍÓÚíóúÇçĆČĐŠŽćčđšžÙùÕõŞŁŇŘşłňřÅåØøĀĒĪŌŪāēīōūÂâĞğıĎĚŤŮďěťůÆæĲĳŒœÐðŸÿßŐŰőűÞþÃãĂĔĬŎŬăĕĭŏŭĨŨĩũĄĘŃŚŻąęńśżĖėĢĶĻŅģķļņĮŲįųŔŹŕźĊĠċġħŜŝŢţŦŧŴŵŶŷĹĽĺľİ
       - " "
       - "▲▼" #―"
-  # - file: "fonts/Pixolletta8px.ttf"
-  #   id: Pixolletta8px15
-  #   size: 15
-  #   glyphs:
-  #     - abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,:;!?()"'-+/*=%@#[]{}<>|&^~
-  #     - ÄËÏÖÜÉÈÔäëïöüéèôŊŋÁÊÎÛÝáêîûýĜĝÀÌÒàìòÑñÍÓÚíóúÇçĆČĐŠŽćčđšžÙùÕõŞŁŇŘşłňřÅåØøĀĒĪŌŪāēīōūÂâĞğıĎĚŤŮďěťůÆæĲĳŒœÐðŸÿßŐŰőűÞþÃãĂĔĬŎŬăĕĭŏŭĨŨĩũĄĘŃŚŻąęńśżĖėĢĶĻŅģķļņĮŲįųŔŹŕźĊĠċġħŜŝŢţŦŧŴŵŶŷĹĽĺľİ
-  #     - " "
+  - file: "fonts/Pixolletta8px.ttf"
+    id: pixolletta8px
+    size: 10
+    glyphs:
+      - abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,:;!?()"'-+/*=%@#[]{}<>|&^~
+      - ÄËÏÖÜÉÈÔäëïöüéèôŊŋÁÊÎÛÝáêîûýĜĝÀÌÒàìòÑñÍÓÚíóúÇçĆČĐŠŽćčđšžÙùÕõŞŁŇŘşłňřÅåØøĀĒĪŌŪāēīōūÂâĞğıĎĚŤŮďěťůÆæĲĳŒœÐðŸÿßŐŰőűÞþÃãĂĔĬŎŬăĕĭŏŭĨŨĩũĄĘŃŚŻąęńśżĖėĢĶĻŅģķļņĮŲįųŔŹŕźĊĠċġħŜŝŢţŦŧŴŵŶŷĹĽĺľİ
+      - " "
 time:
   - platform: sntp
     id: sntp_time
@@ -457,7 +458,7 @@ transit_tracker:
   base_url: "wss://tt.horner.tj/"
   time_display: "arrival"
   limit: 3
-  font_id: pixolletta
+  font_id: pixolletta8px
 
   show_units: "long"
   list_mode: "nextPerRoute"

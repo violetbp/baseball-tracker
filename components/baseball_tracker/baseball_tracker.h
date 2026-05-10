@@ -195,9 +195,9 @@ class BaseballTracker : public Component {
   // before the first out dot.
   static constexpr int kOutDotsY  = 24;  // vertical center of out circles
   static constexpr int kDiamondCY = 20;  // draw_bases_ centre (1st/3rd sit at kOutDotsY)
-  static constexpr int kOutsFirstX  = 115;  // x of leftmost out-dot centre (group toward right edge)
+  static constexpr int kOutsFirstX  = 114;  // x of leftmost out-dot centre (group toward right edge)
   static constexpr int kDiamondOutPadding  = 5;  // min px gap between diamond and first out dot
-  static constexpr int kRow2RightX = 126;  // B–S count right-align edge (see draw_right_aligned)
+  static constexpr int kRow2RightX = 127;  // B–S count right-align edge (see draw_right_aligned)
   // Live: batter line stays left of the infield graphic (see draw_text_max_width_)
   static constexpr int kLiveBatterNameMaxW = 68+15;
 

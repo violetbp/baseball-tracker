@@ -78,7 +78,7 @@ void BaseballTracker::draw_live_() {
 
   char home_buf[16];
   snprintf(home_buf, sizeof(home_buf), "%d  %s", state_.home_score, state_.home_abbrev.c_str());
-  draw_right_aligned_text_(126, kRow1Y, home_buf, kCyan());
+  draw_right_aligned_text_(127, kRow1Y, home_buf, kCyan());
 
   if (state_.inning_intermission != InningIntermissionKind::NONE) {
     const char *prefix = state_.inning_intermission == InningIntermissionKind::MIDDLE ? "mid" : "end";
