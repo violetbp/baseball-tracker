@@ -44,6 +44,7 @@ external_components:
 
 logger:
   level: INFO
+  #VERY_VERBOSE
 
 
 http_request:

@@ -542,9 +542,8 @@
     // Fonts may not be loaded yet — wait, then fetch
     document.fonts.ready.then(() => {
       fetchAndRender();
-      // Poll every 30 s when live, 5 min otherwise
-      // We just poll every 30 s here and let the API return the latest
-      setInterval(fetchAndRender, 30_000);
+      // Poll every 5 s (matches firmware default live-feed cadence)
+      setInterval(fetchAndRender, 5_000);
     });
   </script>
 </body>

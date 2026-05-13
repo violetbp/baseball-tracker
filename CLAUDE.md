@@ -59,7 +59,7 @@ States: `NONE` → `PREVIEW` → `LIVE` → `FINAL`
 
 Two independent poll timers run in `loop()`:
 - **Schedule poll** (slow, ~5 min): discovers game_pk, start time, PREVIEW/FINAL state.
-- **Live feed poll** (fast, configurable default 30 s): only active when state is `LIVE`. Fetches count, runners, inning, and score from the live feed endpoint.
+- **Live feed poll** (fast, configurable default 5 s): only active when state is `LIVE`. Fetches count, runners, inning, and score from the live feed endpoint.
 
 ### Display rendering
 

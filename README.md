@@ -71,7 +71,7 @@ external_components:
 baseball_tracker:
   id: baseball
   team_id: 136        # 136 = Seattle Mariners (default; omit for Mariners)
-  poll_interval: 30s  # refresh rate during live games; auto-slows to 5 min otherwise
+  poll_interval: 5s  # refresh rate during live games; auto-slows to 5 min otherwise
   # Optional: auto-show the baseball display from N minutes before first pitch (UTC vs device clock)
   # through the end of the game; turn off after Final. Requires a template switch id (see firmware).
   auto_baseball_page: true
@@ -130,7 +130,7 @@ GET https://statsapi.mlb.com/api/v1/schedule
     ?sportId=1&teamId={team_id}&hydrate=linescore,team
 ```
 
-No API key required. The component polls this endpoint every `poll_interval` seconds during live games and automatically backs off to every 5 minutes between games. The MLB Stats API is free and has no documented rate limits for reasonable polling.
+No API key required. While a game is live, the component refreshes game state at the configured `poll_interval`. Between games it polls the schedule every five minutes. The MLB Stats API is free and has no documented rate limits for reasonable polling.
 
 ## Configuration reference
 
@@ -143,7 +143,7 @@ baseball_tracker:
 
   # How often to refresh during a live game.
   # Automatically becomes 5 min when no game is in progress.
-  poll_interval: 30s
+  poll_interval: 5s
 
   # (Optional) Explicit display and font IDs — only needed if you have
   # multiple displays or fonts declared.

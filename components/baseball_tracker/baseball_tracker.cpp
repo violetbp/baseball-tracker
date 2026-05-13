@@ -9,6 +9,7 @@
 #include "esphome/components/network/util.h"
 
 #include "esphome/core/log.h"
+#include "esphome/core/application.h"
 #include "esphome/components/json/json_util.h"
 
 namespace esphome {
@@ -17,7 +18,9 @@ namespace baseball_tracker {
 static const char *const TAG = "baseball_tracker";
 
 void BaseballTracker::setup() {
-  ESP_LOGCONFIG(TAG, "Setting up Baseball Tracker (team_id=%d)", team_id_);
+  using_real_api_ = (base_url_.find("statsapi.mlb.com") != std::string::npos);
+  ESP_LOGCONFIG(TAG, "Setting up Baseball Tracker (team_id=%d, real_api=%s)",
+                team_id_, using_real_api_ ? "yes" : "no (custom server)");
 }
 
 void BaseballTracker::loop() {
@@ -62,15 +65,19 @@ void BaseballTracker::loop() {
     }
   }
 
+  uint32_t live_interval = (using_real_api_ && poll_interval_ms_ < kRealApiMinPollMs)
+      ? kRealApiMinPollMs
+      : poll_interval_ms_;
+
   bool need_live = first_poll_done_
       && state_.phase == GamePhase::LIVE
       && state_.game_pk > 0
       && (last_live_poll_ms_ == 0
-          || (now - last_live_poll_ms_) >= poll_interval_ms_);
+          || (now - last_live_poll_ms_) >= live_interval);
 
   if (need_live) {
-    ESP_LOGD(TAG, "Polling feed/live (interval=%u ms, gamePk=%d)",
-             poll_interval_ms_, state_.game_pk);
+    ESP_LOGD(TAG, "Polling feed/live (interval=%u ms%s, gamePk=%d)",
+             live_interval, using_real_api_ ? " [real API]" : "", state_.game_pk);
     fetch_live_feed_(state_.game_pk);
     last_live_poll_ms_ = now;
   }
@@ -93,8 +100,18 @@ void BaseballTracker::dump_config() {
   ESP_LOGCONFIG(TAG, "  Game in progress binary sensor: %s", game_in_progress_sensor_ == nullptr ? "no" : "yes");
 }
 
+void BaseballTracker::set_base_url_and_refresh(const std::string &url) {
+  if (url == base_url_) return;
+  ESP_LOGI(TAG, "Server changed → %s", url.c_str());
+  base_url_ = url;
+  using_real_api_ = (url.find("statsapi.mlb.com") != std::string::npos);
+  first_poll_done_ = false;
+  last_schedule_poll_ms_ = 0;
+  last_live_poll_ms_ = 0;
+}
+
 void BaseballTracker::set_team_id_and_refresh(int team_id) {
-  if (team_id <= 0) {
+  if (team_id < 0) {
     return;
   }
   if (team_id_ == team_id) {
@@ -115,6 +132,7 @@ void BaseballTracker::set_team_id_and_refresh(int team_id) {
   if (ok) {
     first_poll_done_ = true;
     if (state_.phase == GamePhase::LIVE && state_.game_pk > 0) {
+      App.feed_wdt();
       fetch_live_feed_(state_.game_pk);
       last_live_poll_ms_ = now;
     }
@@ -191,7 +209,43 @@ void BaseballTracker::update_game_in_progress_sensor_() {
   in_progress_sensor_published_ = true;
 }
 
+static const char *const kMlbApiLabel = "MLB Stats API";
+static const char *const kMlbApiUrl   = "https://statsapi.mlb.com";
+
+void ServerSelect::setup() {
+  this->traits.set_options({kMlbApiLabel, dev_url_.c_str()});
+
+  if (restore_value_) {
+    pref_ = global_preferences->make_preference<uint8_t>(this->get_object_id_hash());
+    pref_ready_ = true;
+    uint8_t saved = 0;
+    if (pref_.load(&saved) && tracker_ != nullptr) {
+      bool use_dev = (saved == 1);
+      tracker_->set_base_url(use_dev ? dev_url_ : kMlbApiUrl);
+      this->publish_state(use_dev ? dev_url_ : kMlbApiLabel);
+      return;
+    }
+  }
+
+  // Default: reflect whichever URL the YAML configured
+  bool on_dev = tracker_ != nullptr && tracker_->get_base_url() == dev_url_;
+  this->publish_state(on_dev ? dev_url_ : kMlbApiLabel);
+}
+
+void ServerSelect::control(const std::string &value) {
+  this->publish_state(value);
+  if (tracker_ == nullptr) return;
+
+  bool use_dev = (value == dev_url_);
+  if (restore_value_ && pref_ready_) {
+    uint8_t idx = use_dev ? 1 : 0;
+    pref_.save(&idx);
+  }
+  tracker_->set_base_url_and_refresh(use_dev ? dev_url_ : kMlbApiUrl);
+}
+
 static const TeamSelect::TeamOpt kMlbTeams[] = {
+    {"Any", 0},
     {"Arizona Diamondbacks", 109},
     {"Atlanta Braves", 144},
     {"Baltimore Orioles", 110},
@@ -244,6 +298,7 @@ const TeamSelect::TeamOpt *TeamSelect::find_by_id_(int team_id) {
 
 void TeamSelect::setup() {
   this->traits.set_options({
+      "Any",
       "Arizona Diamondbacks",
       "Atlanta Braves",
       "Baltimore Orioles",
@@ -280,7 +335,7 @@ void TeamSelect::setup() {
     pref_ = global_preferences->make_preference<int>(this->get_object_id_hash());
     pref_ready_ = true;
     int saved_team_id = 0;
-    if (pref_.load(&saved_team_id) && saved_team_id > 0 && tracker_ != nullptr) {
+    if (pref_.load(&saved_team_id) && saved_team_id >= 0 && tracker_ != nullptr) {
       tracker_->set_team_id(saved_team_id);
       if (auto *found = find_by_id_(saved_team_id)) {
         this->publish_state(found->name);

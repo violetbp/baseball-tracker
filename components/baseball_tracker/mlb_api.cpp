@@ -7,6 +7,7 @@
 #include <lwip/sockets.h>
 #include "esp_http_client.h"
 #include "esphome/components/network/util.h"
+#include "esphome/core/application.h"
 
 #include "esphome/core/log.h"
 #include "esphome/components/json/json_util.h"
@@ -23,8 +24,30 @@ static std::string last_name_from_full_name(const char *full) {
   return sp != nullptr ? std::string(sp + 1) : std::string(full);
 }
 
+
+static bool is_hit_event_(const char *ev) {
+  static const char *const kHits[] = {
+    "Single", "Double", "Triple", "Home Run", "Grand Slam", nullptr
+  };
+  for (int i = 0; kHits[i]; ++i)
+    if (strcmp(ev, kHits[i]) == 0) return true;
+  return false;
+}
+
+static ScoringPlayType play_type_for_(const char *ev) {
+  if (strcmp(ev, "Grand Slam") == 0) return ScoringPlayType::GRAND_SLAM;
+  if (strcmp(ev, "Home Run")   == 0) return ScoringPlayType::HOME_RUN;
+  return ScoringPlayType::NORMAL;
+}
+
 static const char *const MLB_SCHEDULE_PATH =
     "/api/v1/schedule?sportId=1&teamId=%d&hydrate=linescore,team";
+static const char *const MLB_SCHEDULE_ANY_PATH =
+    "/api/v1/schedule?sportId=1&hydrate=linescore,team"
+    "&fields=totalGames,dates,games,gamePk,gameDate,status,abstractGameState,detailedState,"
+    "teams,away,home,score,team,abbreviation,id,"
+    "linescore,currentInning,currentInningOrdinal,isTopInning,inningState,balls,strikes,outs,"
+    "defense,offense,pitcher,batter,fullName,first,second,third";
 
 static const char *const MLB_LIVE_FEED_PATH =
     "/api/v1.1/game/%d/feed/live?fields="
@@ -35,7 +58,9 @@ static const char *const MLB_LIVE_FEED_PATH =
     "players,useLastName,"
     "liveData,linescore,currentInning,currentInningOrdinal,isTopInning,"
     "inningHalf,inningState,balls,strikes,outs,runs,"
-    "offense,defense,first,second,third,batter,pitcher";
+    "offense,defense,first,second,third,batter,pitcher,"
+    "plays,scoringPlays,"
+    "currentPlay,result,description,event,about,isScoringPlay,atBatIndex,halfInning";
 
 namespace {
 
@@ -71,7 +96,9 @@ static esp_err_t http_event_cb_(esp_http_client_event_t *evt) {
 }
 
 bool http_get_json_(const std::string &base_url, const char *path, std::string *out, const char *log_tag) {
+  ESP_LOGV(log_tag, "http_get_json_: base_url='%s'  path='%s'", base_url.c_str(), path);
   std::string url = join_url_(base_url, path);
+  ESP_LOGV(log_tag, "Full URL (%u chars): %s", (unsigned) url.size(), url.c_str());
   ESP_LOGD(log_tag, "GET %s", url.c_str());
   uint32_t t0 = millis();
 
@@ -79,7 +106,8 @@ bool http_get_json_(const std::string &base_url, const char *path, std::string *
   config.url = url.c_str();
   config.cert_pem = nullptr;
   config.skip_cert_common_name_check = true;
-  config.timeout_ms = 8000;
+  config.timeout_ms = 4000;
+  config.buffer_size_tx = 1024;  // default 512 is too small for long field-filtered URLs
   config.method = HTTP_METHOD_GET;
   config.event_handler = http_event_cb_;
   config.user_data = out;
@@ -92,6 +120,9 @@ bool http_get_json_(const std::string &base_url, const char *path, std::string *
 
   esp_http_client_set_header(client, "User-Agent", "ESPHome-BaseballTracker/1.0");
 
+  // Feed the task watchdog before the blocking HTTP perform so we don't
+  // trip it on slow / falling-back connections.
+  App.feed_wdt();
   esp_err_t err = esp_http_client_perform(client);
   if (err != ESP_OK) {
     ESP_LOGW(log_tag, "HTTP perform failed: %s", esp_err_to_name(err));
@@ -109,18 +140,46 @@ bool http_get_json_(const std::string &base_url, const char *path, std::string *
   }
 
   ESP_LOGD(log_tag, "HTTP 200 in %u ms, body=%u bytes", elapsed, (unsigned) out->size());
+  ESP_LOGV(log_tag, "Response body first 200: %.200s", out->c_str());
   esp_http_client_cleanup(client);
   return true;
 }
 
 }  // namespace
 
-bool BaseballTracker::fetch_schedule_data_() {
-  char path[128];
-  snprintf(path, sizeof(path), MLB_SCHEDULE_PATH, team_id_);
+static const char *const kMlbBaseUrl = "https://statsapi.mlb.com";
 
+bool BaseballTracker::fetch_with_fallback_(const char *path, std::string *out) {
+  if (http_get_json_(base_url_, path, out, TAG)) {
+    using_real_api_ = (base_url_.find("statsapi.mlb.com") != std::string::npos);
+    return true;
+  }
+  // If base_url_ is already the real API there is nothing to fall back to.
+  if (base_url_.find("statsapi.mlb.com") != std::string::npos) {
+    return false;
+  }
+  ESP_LOGW(TAG, "Custom server unreachable, falling back to MLB Stats API");
+  out->clear();
+  if (http_get_json_(kMlbBaseUrl, path, out, TAG)) {
+    using_real_api_ = true;
+    return true;
+  }
+  return false;
+}
+
+bool BaseballTracker::fetch_schedule_data_() {
+  std::string path;
+  if (team_id_ == 0) {
+    path = MLB_SCHEDULE_ANY_PATH;
+  } else {
+    char buf[128];
+    snprintf(buf, sizeof(buf), MLB_SCHEDULE_PATH, team_id_);
+    path = buf;
+  }
+
+  ESP_LOGV(TAG, "fetch_schedule_data_: path='%s'", path.c_str());
   std::string body;
-  if (!http_get_json_(base_url_, path, &body, TAG)) {
+  if (!fetch_with_fallback_(path.c_str(), &body)) {
     return false;
   }
 
@@ -142,6 +201,8 @@ static JsonObject pick_schedule_game(JsonArray dates) {
   if (dates.isNull() || dates.size() == 0) {
     return JsonObject();
   }
+
+  ESP_LOGV(TAG, "pick_schedule_game: %u date(s)", (unsigned) dates.size());
 
   JsonObject any_live;
   JsonObject best_preview;
@@ -166,6 +227,7 @@ static JsonObject pick_schedule_game(JsonArray dates) {
       }
 
       const char *abs = g["status"]["abstractGameState"] | "";
+      ESP_LOGV(TAG, "  game gamePk=%d abs='%s'", g["gamePk"] | 0, abs);
       if (strcmp(abs, "Live") == 0) {
         if (any_live.isNull()) {
           any_live = g;
@@ -202,12 +264,15 @@ static JsonObject pick_schedule_game(JsonArray dates) {
   }
 
   if (!any_live.isNull()) {
+    ESP_LOGV(TAG, "  -> selected Live gamePk=%d", any_live["gamePk"] | 0);
     return any_live;
   }
   if (have_preview) {
+    ESP_LOGV(TAG, "  -> selected Preview gamePk=%d", best_preview["gamePk"] | 0);
     return best_preview;
   }
   if (have_final) {
+    ESP_LOGV(TAG, "  -> selected Final gamePk=%d", best_final["gamePk"] | 0);
     return best_final;
   }
 
@@ -221,10 +286,15 @@ static JsonObject pick_schedule_game(JsonArray dates) {
 bool BaseballTracker::parse_schedule_response_(const std::string &json_body) {
   GameState prev = state_;
 
-  return json::parse_json(json_body, [this, &prev](JsonObject root) -> bool {
+  return json::parse_json(json_body, [this, &prev, &json_body](JsonObject root) -> bool {
+    ESP_LOGV(TAG, "parse_schedule_response_: body_len=%u  totalGames_present=%s  dates_present=%s",
+             (unsigned) json_body.size(),
+             root["totalGames"].isNull() ? "no" : "yes",
+             root["dates"].isNull() ? "no" : "yes");
     state_ = GameState{};
 
     int total_games = root["totalGames"] | 0;
+    ESP_LOGV(TAG, "  totalGames=%d", total_games);
     if (total_games == 0) {
       state_.phase = GamePhase::NONE;
       final_at_utc_ = 0;
@@ -250,6 +320,11 @@ bool BaseballTracker::parse_schedule_response_(const std::string &json_body) {
       return true;
     }
 
+    ESP_LOGV(TAG, "  selected gamePk=%d  status=%s  teams=%s  linescore=%s",
+             game["gamePk"] | 0,
+             game["status"].isNull() ? "MISSING" : "ok",
+             game["teams"].isNull()  ? "MISSING" : "ok",
+             game["linescore"].isNull() ? "absent" : "present");
     state_.game_pk = game["gamePk"] | 0;
 
     {
@@ -264,12 +339,20 @@ bool BaseballTracker::parse_schedule_response_(const std::string &json_body) {
 
     const char *abstract_state = game["status"]["abstractGameState"] | "Preview";
     const char *detailed_state = game["status"]["detailedState"]     | "";
+    ESP_LOGV(TAG, "  abstractGameState='%s'  detailedState='%s'", abstract_state, detailed_state);
     state_.detailed_state = detailed_state;
-    if (strcmp(abstract_state, "Live") == 0) {
+    // "Warmup" and "Pre-Game" arrive with abstractGameState=="Live" but the
+    // game hasn't started; keep them as PREVIEW so the pre-game screen shows.
+    auto is_pregame_detail = [](const char *d) {
+      return strcasecmp(d, "Warmup") == 0 || strcasecmp(d, "Pre-Game") == 0;
+    };
+    if (strcmp(abstract_state, "Live") == 0 && !is_pregame_detail(detailed_state)) {
       state_.phase = GamePhase::LIVE;
     } else if (strcmp(abstract_state, "Final") == 0) {
       state_.phase = GamePhase::FINAL;
     } else {
+      ESP_LOGV(TAG, "  abstractGameState '%s' detailedState '%s' treated as PREVIEW",
+               abstract_state, detailed_state);
       state_.phase = GamePhase::PREVIEW;
     }
 
@@ -283,6 +366,7 @@ bool BaseballTracker::parse_schedule_response_(const std::string &json_body) {
     state_.home_abbrev = teams["home"]["team"]["abbreviation"] | "???";
     state_.away_score  = teams["away"]["score"] | 0;
     state_.home_score  = teams["home"]["score"] | 0;
+    state_.user_team_is_home = ((teams["home"]["team"]["id"] | 0) == team_id_);
 
     if (state_.away_score != prev.away_score || state_.home_score != prev.home_score) {
       ESP_LOGI(TAG, "Score update: %s %d, %s %d",
@@ -325,11 +409,14 @@ bool BaseballTracker::parse_schedule_response_(const std::string &json_body) {
       }
 
       const char *inning_state = ls["inningState"] | "";
+      ESP_LOGV(TAG, "  schedule inningState='%s'", inning_state);
       state_.inning_intermission = InningIntermissionKind::NONE;
       if (strcasecmp(inning_state, "Middle") == 0) {
         state_.inning_intermission = InningIntermissionKind::MIDDLE;
       } else if (strcasecmp(inning_state, "End") == 0) {
         state_.inning_intermission = InningIntermissionKind::END;
+      } else if (inning_state[0] != '\0') {
+        ESP_LOGV(TAG, "  inningState '%s' not Middle/End, treated as active", inning_state);
       }
       if (state_.inning_intermission != InningIntermissionKind::NONE) {
         state_.outs = 0;
@@ -391,7 +478,7 @@ bool BaseballTracker::fetch_live_feed_(int game_pk) {
   snprintf(path, sizeof(path), MLB_LIVE_FEED_PATH, game_pk);
 
   std::string body;
-  if (!http_get_json_(base_url_, path, &body, TAG)) {
+  if (!fetch_with_fallback_(path, &body)) {
     return false;
   }
 
@@ -406,7 +493,11 @@ bool BaseballTracker::fetch_live_feed_(int game_pk) {
 bool BaseballTracker::parse_live_feed_response_(const std::string &json_body) {
   GameState prev = state_;
 
-  return json::parse_json(json_body, [this, &prev](JsonObject root) -> bool {
+  return json::parse_json(json_body, [this, &prev, &json_body](JsonObject root) -> bool {
+    ESP_LOGV(TAG, "parse_live_feed_response_: body_len=%u  gameData=%s  liveData=%s",
+             (unsigned) json_body.size(),
+             root["gameData"].isNull() ? "MISSING" : "ok",
+             root["liveData"].isNull() ? "MISSING" : "ok");
     JsonObject game_data = root["gameData"];
     JsonObject live_data = root["liveData"];
     if (game_data.isNull() || live_data.isNull()) {
@@ -505,13 +596,20 @@ bool BaseballTracker::parse_live_feed_response_(const std::string &json_body) {
 
     state_.batter_last  = resolve_last(batter_id);
     state_.pitcher_last = resolve_last(pitcher_id);
+    if (state_.batter_last.empty()  && batter_id  > 0)
+      ESP_LOGV(TAG, "  batter id=%d not found in player map",  batter_id);
+    if (state_.pitcher_last.empty() && pitcher_id > 0)
+      ESP_LOGV(TAG, "  pitcher id=%d not found in player map", pitcher_id);
 
     const char *inning_state = ls["inningState"] | "";
+    ESP_LOGV(TAG, "  live inningState='%s'", inning_state);
     state_.inning_intermission = InningIntermissionKind::NONE;
     if (strcasecmp(inning_state, "Middle") == 0) {
       state_.inning_intermission = InningIntermissionKind::MIDDLE;
     } else if (strcasecmp(inning_state, "End") == 0) {
       state_.inning_intermission = InningIntermissionKind::END;
+    } else if (inning_state[0] != '\0') {
+      ESP_LOGV(TAG, "  inningState '%s' not Middle/End, treated as active", inning_state);
     }
     if (state_.inning_intermission != InningIntermissionKind::NONE) {
       state_.outs = 0;
@@ -522,6 +620,49 @@ bool BaseballTracker::parse_live_feed_response_(const std::string &json_body) {
     if (state_.away_score != prev.away_score || state_.home_score != prev.home_score) {
       ESP_LOGI(TAG, "Score update (live): %s %d, %s %d", state_.away_abbrev.c_str(), state_.away_score,
                state_.home_abbrev.c_str(), state_.home_score);
+    }
+
+    JsonObject plays = live_data["plays"];
+    if (!plays.isNull()) {
+      JsonArray scoring_plays = plays["scoringPlays"];
+      int sp_count = (int)scoring_plays.size();
+
+      if (state_.known_scoring_play_count >= 0 && sp_count > state_.known_scoring_play_count) {
+        JsonObject cp        = plays["currentPlay"];
+        const char *event    = cp["result"]["event"]       | "";
+        const char *desc     = cp["result"]["description"] | "";
+        const char *half     = cp["about"]["halfInning"]   | "";
+
+        // "bottom" half = home team batting = home team scored; XOR with user_team_is_home
+        bool user_scored = (strcmp(half, "bottom") == 0) == state_.user_team_is_home;
+
+        ScoringPlayType ptype = (user_scored && is_hit_event_(event))
+            ? play_type_for_(event)
+            : ScoringPlayType::NORMAL;
+
+        std::string text;
+        if (is_hit_event_(event) && desc[0] != '\0') {
+          text = std::string(desc);
+        } else {
+          char fallback[40];
+          snprintf(fallback, sizeof(fallback), "Run scored! %s %d  %s %d",
+                   state_.away_abbrev.c_str(), state_.away_score,
+                   state_.home_abbrev.c_str(), state_.home_score);
+          text = fallback;
+        }
+
+        if (state_.scoring_play_text.empty()) {
+          state_.scoring_play_text       = text;
+          state_.scoring_play_type       = ptype;
+          state_.scoring_play_started_ms = millis();
+          state_.scoring_play_end_ms     = 0;
+        } else {
+          state_.scoring_play_queue.push_back(text);
+          state_.scoring_play_type_queue.push_back(ptype);
+        }
+        ESP_LOGI(TAG, "Scoring play (type=%d): %s", (int)ptype, text.c_str());
+      }
+      state_.known_scoring_play_count = sp_count;
     }
 
     if (state_.inning != prev.inning || state_.is_top_inning != prev.is_top_inning ||

@@ -8,11 +8,11 @@ packages:   # as a list
 baseball_tracker:
   id: baseball
   team_id: 136 #116 #121 # # default/fallback (will be overridden by the dropdown when set)
-  # base_url: "http://10.0.3.29:8080"
+  base_url: "http://10.0.3.29:8080"
   team_select:
     name: "MLB Team"
     restore_value: true
-  poll_interval: 2s
+  poll_interval: .2s
   font_id: pixolletta8px_edit
   # Auto: show the baseball page from 5 min before first pitch; hide after Final
   # (device clock must be NTP sync’d). Requires baseball_page_switch below.

@@ -2,6 +2,7 @@
 
 #include <ctime>
 #include <string>
+#include <vector>
 
 #include "esphome/core/component.h"
 #include "esphome/core/color.h"
@@ -23,6 +24,8 @@ enum class GamePhase {
   LIVE,     // In progress (or warmup)
   FINAL,    // Game over
 };
+
+enum class ScoringPlayType { NORMAL, HOME_RUN, GRAND_SLAM };
 
 /// linescore.inningState when not actively Top/Bottom (MLB sends "Middle", "End", etc.)
 enum class InningIntermissionKind {
@@ -70,6 +73,18 @@ struct GameState {
 
   // Game primary key for potential future live-feed polling
   int game_pk{0};
+
+  // Scoring hit scroll
+  std::string scoring_play_text;
+  ScoringPlayType scoring_play_type{ScoringPlayType::NORMAL};
+  uint32_t    scoring_play_started_ms{0};
+  uint32_t    scoring_play_end_ms{0};        // computed once on first render; 0 = not yet set
+  int         known_scoring_play_count{-1};  // -1 = first poll sentinel
+
+  std::vector<std::string>          scoring_play_queue;
+  std::vector<ScoringPlayType>      scoring_play_type_queue;
+
+  bool user_team_is_home{false};
 };
 
 class BaseballTracker : public Component {
@@ -102,6 +117,10 @@ class BaseballTracker : public Component {
   // Used by the HA team select: set team id and repoll immediately.
   void set_team_id_and_refresh(int team_id);
 
+  // Used by the HA server select: switch base URL and repoll immediately.
+  void set_base_url_and_refresh(const std::string &url);
+  const std::string &get_base_url() const { return base_url_; }
+
   static bool parse_iso8601_utc(const char *iso, time_t *out);
 
  protected:
@@ -110,6 +129,7 @@ class BaseballTracker : public Component {
   void draw_pregame_();
   void draw_live_();
   void draw_final_();
+  void draw_spectacle_(uint32_t elapsed_ms, ScoringPlayType type);
 
   // Draw the compact base diamond at pixel (cx, cy) = center of the diamond
   void draw_bases_(int cx, int cy);
@@ -137,6 +157,10 @@ class BaseballTracker : public Component {
   bool fetch_live_feed_(int game_pk);
   bool parse_live_feed_response_(const std::string &json_body);
 
+  // HTTP helper: tries base_url_ first; if that fails and a custom server is
+  // configured, retries against the real MLB Stats API and sets using_real_api_.
+  bool fetch_with_fallback_(const char *path, std::string *out);
+
   // Auto baseball page: on from (first pitch − lead) through until Final / no game
   void try_auto_baseball_page_();
   bool should_auto_show_baseball_() const;
@@ -147,10 +171,15 @@ class BaseballTracker : public Component {
   font::Font *font_{nullptr};
   time::RealTimeClock *rtc_{nullptr};
 
+  // Minimum live-feed poll interval when querying the real MLB Stats API.
+  // Keeps a fast test poll_interval from hammering statsapi.mlb.com on fallback.
+  static constexpr uint32_t kRealApiMinPollMs = 5'000;
+
   uint32_t wifi_connected_at_ms_{0};
   int team_id_{136};
-  uint32_t poll_interval_ms_{30000};
+  uint32_t poll_interval_ms_{5000};
   std::string base_url_{"https://statsapi.mlb.com"};
+  bool using_real_api_{true};  // false only when a custom server is reachable
 
   // Two independent cadences: schedule (discovery, slow) and feed/live (fast,
   // only while LIVE).
@@ -197,13 +226,35 @@ class BaseballTracker : public Component {
   static constexpr int kDiamondCY = 20;  // draw_bases_ centre (1st/3rd sit at kOutDotsY)
   static constexpr int kOutsFirstX  = 114;  // x of leftmost out-dot centre (group toward right edge)
   static constexpr int kDiamondOutPadding  = 5;  // min px gap between diamond and first out dot
-  static constexpr int kRow2RightX = 127;  // B–S count right-align edge (see draw_right_aligned)
+  static constexpr int kRow2RightX = 125;  // B–S count right-align edge (2 px gap from display edge)
   // Live: batter line stays left of the infield graphic (see draw_text_max_width_)
   static constexpr int kLiveBatterNameMaxW = 68+15;
 
   // Dot geometry (outs indicator, line 3)
   static constexpr int kDotR    = 3;  // dot radius in pixels
   static constexpr int kDotStep = 8;  // pixel spacing between dot centers
+
+  // Scoring hit scroll
+  static constexpr int kScrollPxPerSec    = 30;
+  static constexpr int kHRSpectacleMs     = 500;   // celebratory flash duration for home run
+  static constexpr int kGSlamSpectacleMs  = 1000;  // celebratory flash duration for grand slam
+};
+
+class ServerSelect : public Component, public select::Select {
+ public:
+  void set_tracker(BaseballTracker *t) { tracker_ = t; }
+  void set_dev_url(const std::string &url) { dev_url_ = url; }
+  void set_restore_value(bool v) { restore_value_ = v; }
+
+  void setup() override;
+  void control(const std::string &value) override;
+
+ protected:
+  BaseballTracker *tracker_{nullptr};
+  std::string dev_url_;
+  bool restore_value_{false};
+  ESPPreferenceObject pref_;
+  bool pref_ready_{false};
 };
 
 class TeamSelect : public Component, public select::Select {

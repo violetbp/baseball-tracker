@@ -21,6 +21,7 @@ AUTO_LOAD = ["json"]
 baseball_tracker_ns = cg.esphome_ns.namespace("baseball_tracker")
 BaseballTracker = baseball_tracker_ns.class_("BaseballTracker", cg.Component)
 TeamSelect = baseball_tracker_ns.class_("TeamSelect", select.Select, cg.Component)
+ServerSelect = baseball_tracker_ns.class_("ServerSelect", select.Select, cg.Component)
 
 CONF_FONT_ID = "font_id"
 CONF_TEAM_ID = "team_id"
@@ -31,11 +32,13 @@ CONF_AUTO_PAGE_POST_FINAL = "auto_page_post_final"
 CONF_BASEBALL_PAGE_SWITCH = "baseball_page_switch"
 CONF_GAME_IN_PROGRESS = "game_in_progress"
 CONF_TEAM_SELECT = "team_select"
+CONF_SERVER_SELECT = "server_select"
 CONF_BASE_URL = "base_url"
 
 _MARINERS_TEAM_ID = 136
 
 _MLB_TEAM_OPTIONS = [
+    "Any",
     "Arizona Diamondbacks",
     "Atlanta Braves",
     "Baltimore Orioles",
@@ -88,7 +91,7 @@ CONFIG_SCHEMA = cv.All(
             cv.GenerateID(CONF_FONT_ID): cv.use_id(Font),
             cv.GenerateID(CONF_TIME_ID): cv.use_id(RealTimeClock),
             cv.Optional(CONF_TEAM_ID, default=_MARINERS_TEAM_ID): cv.positive_int,
-            cv.Optional(CONF_POLL_INTERVAL, default="30s"): cv.positive_time_period_milliseconds,
+            cv.Optional(CONF_POLL_INTERVAL, default="5s"): cv.positive_time_period_milliseconds,
             # Override the MLB API host for testing (e.g. http://10.0.3.29:8080).
             # Default is the real MLB Stats API.
             cv.Optional(CONF_BASE_URL, default="https://statsapi.mlb.com"): cv.url,
@@ -100,6 +103,11 @@ CONFIG_SCHEMA = cv.All(
                 device_class="running"
             ),
             cv.Optional(CONF_TEAM_SELECT): select.select_schema(TeamSelect).extend(
+                {
+                    cv.Optional(CONF_RESTORE_VALUE, default=True): cv.boolean,
+                }
+            ),
+            cv.Optional(CONF_SERVER_SELECT): select.select_schema(ServerSelect).extend(
                 {
                     cv.Optional(CONF_RESTORE_VALUE, default=True): cv.boolean,
                 }
@@ -149,5 +157,15 @@ async def to_code(config):
         cg.add(sel.set_restore_value(sel_conf[CONF_RESTORE_VALUE]))
         await cg.register_component(sel, sel_conf)
         await select.register_select(sel, sel_conf, options=_MLB_TEAM_OPTIONS)
+
+    if CONF_SERVER_SELECT in config and config[CONF_SERVER_SELECT]:
+        sel_conf = config[CONF_SERVER_SELECT]
+        dev_url = config.get(CONF_BASE_URL, "https://statsapi.mlb.com")
+        sel = cg.new_Pvariable(sel_conf[CONF_ID])
+        cg.add(sel.set_tracker(var))
+        cg.add(sel.set_dev_url(dev_url))
+        cg.add(sel.set_restore_value(sel_conf[CONF_RESTORE_VALUE]))
+        await cg.register_component(sel, sel_conf)
+        await select.register_select(sel, sel_conf, options=["MLB Stats API", dev_url])
 
     await cg.register_component(var, config)

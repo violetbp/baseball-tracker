@@ -106,12 +106,63 @@ void BaseballTracker::draw_live_() {
     }
   }
 
+  // Advance queue: when the current play (spectacle + scroll) finishes, load the next one.
+  // scoring_play_end_ms is computed once on first render to avoid per-frame get_text_bounds.
+  if (!state_.scoring_play_text.empty()) {
+    if (state_.scoring_play_end_ms == 0) {
+      int spec_ms = (state_.scoring_play_type == ScoringPlayType::GRAND_SLAM) ? kGSlamSpectacleMs
+                  : (state_.scoring_play_type == ScoringPlayType::HOME_RUN)   ? kHRSpectacleMs : 0;
+      int tw = 0, th = 0, xo = 0, yo = 0;
+      display_->get_text_bounds(0, 0, state_.scoring_play_text.c_str(), font_,
+                                display::TextAlign::TOP_LEFT, &xo, &yo, &tw, &th);
+      if (tw < 0) tw = 0;
+      uint32_t sp_ms = (uint32_t)((tw + kDisplayW) * 1000 / kScrollPxPerSec);
+      if (sp_ms < 1) sp_ms = 1;
+      state_.scoring_play_end_ms = state_.scoring_play_started_ms + (uint32_t)spec_ms + sp_ms;
+    }
+    if (millis() >= state_.scoring_play_end_ms) {
+      if (!state_.scoring_play_queue.empty()) {
+        state_.scoring_play_text       = state_.scoring_play_queue.front();
+        state_.scoring_play_type       = state_.scoring_play_type_queue.front();
+        state_.scoring_play_started_ms = millis();
+        state_.scoring_play_end_ms     = 0;
+        state_.scoring_play_queue.erase(state_.scoring_play_queue.begin());
+        state_.scoring_play_type_queue.erase(state_.scoring_play_type_queue.begin());
+      } else {
+        state_.scoring_play_text.clear();
+      }
+    }
+  }
+
+  // Determine display mode for rows 2-3
+  bool in_spectacle  = false;
+  bool showing_scroll = false;
+  uint32_t play_elapsed    = 0;
+  int      cur_spectacle_ms = 0;
+  if (!state_.scoring_play_text.empty()) {
+    play_elapsed      = millis() - state_.scoring_play_started_ms;
+    cur_spectacle_ms  = (state_.scoring_play_type == ScoringPlayType::GRAND_SLAM) ? kGSlamSpectacleMs
+                      : (state_.scoring_play_type == ScoringPlayType::HOME_RUN)   ? kHRSpectacleMs : 0;
+    if (cur_spectacle_ms > 0 && play_elapsed < (uint32_t)cur_spectacle_ms) {
+      in_spectacle = true;
+    } else {
+      showing_scroll = true;
+    }
+  }
+
+  // Spectacle replaces rows 2-3 entirely; row 1 is already drawn above
+  if (in_spectacle) {
+    draw_spectacle_(play_elapsed, state_.scoring_play_type);
+    return;
+  }
+
+  // Row 2: pitcher name + ball-strike count
   char count_buf[8];
   snprintf(count_buf, sizeof(count_buf), "%d-%d", state_.balls, state_.strikes);
   {
     int count_w, count_h, cxo, cyo;
     display_->get_text_bounds(0, 0, count_buf, font_, display::TextAlign::TOP_LEFT, &cxo, &cyo, &count_w,
-                                &count_h);
+                              &count_h);
     if (count_w < 0)
       count_w = 0;
     int max_p_w = kRow2RightX - 2 - count_w - 3;
@@ -124,20 +175,27 @@ void BaseballTracker::draw_live_() {
   }
   draw_right_aligned_text_(kRow2RightX, kRow2Y, count_buf, kWhite());
 
-  {
-    const char *bl = state_.batter_last.empty() ? "--" : state_.batter_last.c_str();
-    char b_line[28];
-    snprintf(b_line, sizeof(b_line), "B: %s", bl);
-    draw_text_max_width_(2, kPregameRow3Y, kLiveBatterNameMaxW, b_line, kCyan());
+  // Row 3: scrolling play description, or batter/diamond/outs
+  if (showing_scroll) {
+    uint32_t scroll_elapsed = play_elapsed - (uint32_t)cur_spectacle_ms;
+    int scroll_x = kDisplayW - (int)(scroll_elapsed * kScrollPxPerSec / 1000);
+    display_->print(scroll_x, kPregameRow3Y, font_, kYellow(), state_.scoring_play_text.c_str());
+  } else {
+    {
+      const char *bl = state_.batter_last.empty() ? "--" : state_.batter_last.c_str();
+      char b_line[28];
+      snprintf(b_line, sizeof(b_line), "B: %s", bl);
+      draw_text_max_width_(2, kPregameRow3Y, kLiveBatterNameMaxW, b_line, kCyan());
+    }
+
+    static constexpr int d13x = 8;
+    static constexpr int base_pad = 2;
+    int diamond_right = d13x + base_pad;
+    int diamond_cx = kOutsFirstX - kDotR - kDiamondOutPadding - diamond_right;
+    draw_bases_(diamond_cx, kDiamondCY);
+
+    draw_dots_(kOutsFirstX, kOutDotsY, 2, state_.outs, kRed(), kDim());
   }
-
-  static constexpr int d13x = 8;
-  static constexpr int base_pad = 2;
-  int diamond_right = d13x + base_pad;
-  int diamond_cx = kOutsFirstX - kDotR - kDiamondOutPadding - diamond_right;
-  draw_bases_(diamond_cx, kDiamondCY);
-
-  draw_dots_(kOutsFirstX, kOutDotsY, 2, state_.outs, kRed(), kDim());
 }
 
 void BaseballTracker::draw_final_() {
@@ -150,6 +208,23 @@ void BaseballTracker::draw_final_() {
   draw_centered_text_(78, 126, kRow1Y, home_buf, kWhite());
 
   draw_centered_text_(0, kDisplayW, kRow2Y, state_.inning_ordinal.c_str(), kDim());
+}
+
+void BaseballTracker::draw_spectacle_(uint32_t elapsed_ms, ScoringPlayType type) {
+  auto *d = display_;
+  bool flash_on = (elapsed_ms / 125) % 2 == 0;
+  Color fg = flash_on ? kYellow() : kWhite();
+
+  const char *label = (type == ScoringPlayType::GRAND_SLAM) ? "GRAND SLAM!" : "HR!";
+  int text_w = 0, text_h = 0, xo = 0, yo = 0;
+  display_->get_text_bounds(0, 0, label, font_, display::TextAlign::TOP_LEFT, &xo, &yo, &text_w, &text_h);
+  if (text_w < 0) text_w = 0;
+  int label_x = (kDisplayW - text_w) / 2;
+  display_->print(label_x, kRow2Y, font_, fg, label);
+
+  if (type == ScoringPlayType::GRAND_SLAM && flash_on) {
+    d->rectangle(0, 0, kDisplayW, kDisplayH, kYellow());
+  }
 }
 
 void BaseballTracker::draw_bases_(int cx, int cy) {
