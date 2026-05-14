@@ -189,9 +189,9 @@ bool BaseballTracker::fetch_schedule_data_() {
   }
 
   uint32_t now_ms = millis();
-  if (state_.phase != GamePhase::LIVE || (now_ms - last_mlb_status_log_ms_) >= 30000) {
-    ESP_LOGI(TAG, "MLB: gamePk=%d %s @ %s phase=%d (%s)", state_.game_pk, state_.away_abbrev.c_str(),
-             state_.home_abbrev.c_str(), (int) state_.phase, state_.detailed_state.c_str());
+  if (pending_state_.phase != GamePhase::LIVE || (now_ms - last_mlb_status_log_ms_) >= 30000) {
+    ESP_LOGI(TAG, "MLB: gamePk=%d %s @ %s phase=%d (%s)", pending_state_.game_pk, pending_state_.away_abbrev.c_str(),
+             pending_state_.home_abbrev.c_str(), (int) pending_state_.phase, pending_state_.detailed_state.c_str());
     last_mlb_status_log_ms_ = now_ms;
   }
   return true;
@@ -284,19 +284,19 @@ static JsonObject pick_schedule_game(JsonArray dates) {
 }
 
 bool BaseballTracker::parse_schedule_response_(const std::string &json_body) {
-  GameState prev = state_;
+  GameState prev = pending_state_;
 
   return json::parse_json(json_body, [this, &prev, &json_body](JsonObject root) -> bool {
     ESP_LOGV(TAG, "parse_schedule_response_: body_len=%u  totalGames_present=%s  dates_present=%s",
              (unsigned) json_body.size(),
              root["totalGames"].isNull() ? "no" : "yes",
              root["dates"].isNull() ? "no" : "yes");
-    state_ = GameState{};
+    pending_state_ = GameState{};
 
     int total_games = root["totalGames"] | 0;
     ESP_LOGV(TAG, "  totalGames=%d", total_games);
     if (total_games == 0) {
-      state_.phase = GamePhase::NONE;
+      pending_state_.phase = GamePhase::NONE;
       final_at_utc_ = 0;
       if (prev.phase != GamePhase::NONE) {
         ESP_LOGI(TAG, "No game scheduled today");
@@ -306,7 +306,7 @@ bool BaseballTracker::parse_schedule_response_(const std::string &json_body) {
 
     JsonArray dates = root["dates"];
     if (dates.isNull() || dates.size() == 0) {
-      state_.phase = GamePhase::NONE;
+      pending_state_.phase = GamePhase::NONE;
       final_at_utc_ = 0;
       ESP_LOGW(TAG, "totalGames=%d but dates array is empty", total_games);
       return true;
@@ -314,7 +314,7 @@ bool BaseballTracker::parse_schedule_response_(const std::string &json_body) {
 
     JsonObject game = pick_schedule_game(dates);
     if (game.isNull()) {
-      state_.phase = GamePhase::NONE;
+      pending_state_.phase = GamePhase::NONE;
       final_at_utc_ = 0;
       ESP_LOGW(TAG, "No selectable game in schedule response");
       return true;
@@ -325,140 +325,140 @@ bool BaseballTracker::parse_schedule_response_(const std::string &json_body) {
              game["status"].isNull() ? "MISSING" : "ok",
              game["teams"].isNull()  ? "MISSING" : "ok",
              game["linescore"].isNull() ? "absent" : "present");
-    state_.game_pk = game["gamePk"] | 0;
+    pending_state_.game_pk = game["gamePk"] | 0;
 
     {
       const char *gd = game["gameDate"] | "";
-      state_.start_time_str = gd;
-      if (gd[0] == '\0' || !parse_iso8601_utc(gd, &state_.game_start_utc) || state_.game_start_utc <= 0) {
-        state_.has_game_start = false;
+      pending_state_.start_time_str = gd;
+      if (gd[0] == '\0' || !parse_iso8601_utc(gd, &pending_state_.game_start_utc) || pending_state_.game_start_utc <= 0) {
+        pending_state_.has_game_start = false;
       } else {
-        state_.has_game_start = true;
+        pending_state_.has_game_start = true;
       }
     }
 
     const char *abstract_state = game["status"]["abstractGameState"] | "Preview";
     const char *detailed_state = game["status"]["detailedState"]     | "";
     ESP_LOGV(TAG, "  abstractGameState='%s'  detailedState='%s'", abstract_state, detailed_state);
-    state_.detailed_state = detailed_state;
+    pending_state_.detailed_state = detailed_state;
     // "Warmup" and "Pre-Game" arrive with abstractGameState=="Live" but the
     // game hasn't started; keep them as PREVIEW so the pre-game screen shows.
     auto is_pregame_detail = [](const char *d) {
       return strcasecmp(d, "Warmup") == 0 || strcasecmp(d, "Pre-Game") == 0;
     };
     if (strcmp(abstract_state, "Live") == 0 && !is_pregame_detail(detailed_state)) {
-      state_.phase = GamePhase::LIVE;
+      pending_state_.phase = GamePhase::LIVE;
     } else if (strcmp(abstract_state, "Final") == 0) {
-      state_.phase = GamePhase::FINAL;
+      pending_state_.phase = GamePhase::FINAL;
     } else {
       ESP_LOGV(TAG, "  abstractGameState '%s' detailedState '%s' treated as PREVIEW",
                abstract_state, detailed_state);
-      state_.phase = GamePhase::PREVIEW;
+      pending_state_.phase = GamePhase::PREVIEW;
     }
 
-    if (prev.phase != state_.phase) {
+    if (prev.phase != pending_state_.phase) {
       ESP_LOGI(TAG, "Game phase changed: %d → %d (%s) [gamePk=%d]",
-               (int)prev.phase, (int)state_.phase, detailed_state, state_.game_pk);
+               (int)prev.phase, (int)pending_state_.phase, detailed_state, pending_state_.game_pk);
     }
 
     JsonObject teams = game["teams"];
-    state_.away_abbrev = teams["away"]["team"]["abbreviation"] | "???";
-    state_.home_abbrev = teams["home"]["team"]["abbreviation"] | "???";
-    state_.away_score  = teams["away"]["score"] | 0;
-    state_.home_score  = teams["home"]["score"] | 0;
-    state_.user_team_is_home = ((teams["home"]["team"]["id"] | 0) == team_id_);
+    pending_state_.away_abbrev = teams["away"]["team"]["abbreviation"] | "???";
+    pending_state_.home_abbrev = teams["home"]["team"]["abbreviation"] | "???";
+    pending_state_.away_score  = teams["away"]["score"] | 0;
+    pending_state_.home_score  = teams["home"]["score"] | 0;
+    pending_state_.user_team_is_home = ((teams["home"]["team"]["id"] | 0) == team_id_);
 
-    if (state_.away_score != prev.away_score || state_.home_score != prev.home_score) {
+    if (pending_state_.away_score != prev.away_score || pending_state_.home_score != prev.home_score) {
       ESP_LOGI(TAG, "Score update: %s %d, %s %d",
-               state_.away_abbrev.c_str(), state_.away_score,
-               state_.home_abbrev.c_str(), state_.home_score);
+               pending_state_.away_abbrev.c_str(), pending_state_.away_score,
+               pending_state_.home_abbrev.c_str(), pending_state_.home_score);
     }
 
-    if (state_.phase == GamePhase::PREVIEW) {
+    if (pending_state_.phase == GamePhase::PREVIEW) {
       ESP_LOGI(TAG, "Game preview: %s @ %s, start=%s",
-               state_.away_abbrev.c_str(), state_.home_abbrev.c_str(), state_.start_time_str.c_str());
+               pending_state_.away_abbrev.c_str(), pending_state_.home_abbrev.c_str(), pending_state_.start_time_str.c_str());
     }
 
     JsonObject ls = game["linescore"];
     if (ls.isNull()) {
-      ESP_LOGD(TAG, "No linescore in response (phase=%d)", (int)state_.phase);
+      ESP_LOGD(TAG, "No linescore in response (phase=%d)", (int)pending_state_.phase);
     } else {
-      state_.inning         = ls["currentInning"] | 0;
-      state_.inning_ordinal = ls["currentInningOrdinal"] | "";
-      state_.is_top_inning  = ls["isTopInning"] | true;
-      state_.balls          = ls["balls"] | 0;
-      state_.strikes        = ls["strikes"] | 0;
-      state_.outs           = ls["outs"] | 0;
+      pending_state_.inning         = ls["currentInning"] | 0;
+      pending_state_.inning_ordinal = ls["currentInningOrdinal"] | "";
+      pending_state_.is_top_inning  = ls["isTopInning"] | true;
+      pending_state_.balls          = ls["balls"] | 0;
+      pending_state_.strikes        = ls["strikes"] | 0;
+      pending_state_.outs           = ls["outs"] | 0;
 
-      state_.pitcher_last.clear();
-      state_.batter_last.clear();
+      pending_state_.pitcher_last.clear();
+      pending_state_.batter_last.clear();
       JsonObject defense = ls["defense"];
       if (!defense.isNull() && !defense["pitcher"].isNull()) {
         const char *pn = defense["pitcher"]["fullName"] | "";
-        state_.pitcher_last = last_name_from_full_name(pn);
+        pending_state_.pitcher_last = last_name_from_full_name(pn);
       }
       JsonObject offense = ls["offense"];
       if (!offense.isNull()) {
-        state_.runner_first  = !offense["first"].isNull();
-        state_.runner_second = !offense["second"].isNull();
-        state_.runner_third  = !offense["third"].isNull();
+        pending_state_.runner_first  = !offense["first"].isNull();
+        pending_state_.runner_second = !offense["second"].isNull();
+        pending_state_.runner_third  = !offense["third"].isNull();
         if (!offense["batter"].isNull()) {
           const char *bn = offense["batter"]["fullName"] | "";
-          state_.batter_last = last_name_from_full_name(bn);
+          pending_state_.batter_last = last_name_from_full_name(bn);
         }
       }
 
       const char *inning_state = ls["inningState"] | "";
       ESP_LOGV(TAG, "  schedule inningState='%s'", inning_state);
-      state_.inning_intermission = InningIntermissionKind::NONE;
+      pending_state_.inning_intermission = InningIntermissionKind::NONE;
       if (strcasecmp(inning_state, "Middle") == 0) {
-        state_.inning_intermission = InningIntermissionKind::MIDDLE;
+        pending_state_.inning_intermission = InningIntermissionKind::MIDDLE;
       } else if (strcasecmp(inning_state, "End") == 0) {
-        state_.inning_intermission = InningIntermissionKind::END;
+        pending_state_.inning_intermission = InningIntermissionKind::END;
       } else if (inning_state[0] != '\0') {
         ESP_LOGV(TAG, "  inningState '%s' not Middle/End, treated as active", inning_state);
       }
-      if (state_.inning_intermission != InningIntermissionKind::NONE) {
-        state_.outs = 0;
-        state_.batter_last.clear();
-        state_.runner_first = state_.runner_second = state_.runner_third = false;
+      if (pending_state_.inning_intermission != InningIntermissionKind::NONE) {
+        pending_state_.outs = 0;
+        pending_state_.batter_last.clear();
+        pending_state_.runner_first = pending_state_.runner_second = pending_state_.runner_third = false;
       }
 
       ESP_LOGD(TAG, "%s @ %s  %d-%d  %s%s  B%d S%d O%d  bases:[%s%s%s]",
-               state_.away_abbrev.c_str(), state_.home_abbrev.c_str(),
-               state_.away_score, state_.home_score,
-               state_.is_top_inning ? "T" : "B", state_.inning_ordinal.c_str(),
-               state_.balls, state_.strikes, state_.outs,
-               state_.runner_first  ? "1" : "-",
-               state_.runner_second ? "2" : "-",
-               state_.runner_third  ? "3" : "-");
+               pending_state_.away_abbrev.c_str(), pending_state_.home_abbrev.c_str(),
+               pending_state_.away_score, pending_state_.home_score,
+               pending_state_.is_top_inning ? "T" : "B", pending_state_.inning_ordinal.c_str(),
+               pending_state_.balls, pending_state_.strikes, pending_state_.outs,
+               pending_state_.runner_first  ? "1" : "-",
+               pending_state_.runner_second ? "2" : "-",
+               pending_state_.runner_third  ? "3" : "-");
 
       ESP_LOGV(TAG, "Count detail — balls=%d strikes=%d outs=%d  runners: 1st=%d 2nd=%d 3rd=%d",
-               state_.balls, state_.strikes, state_.outs,
-               (int)state_.runner_first, (int)state_.runner_second, (int)state_.runner_third);
+               pending_state_.balls, pending_state_.strikes, pending_state_.outs,
+               (int)pending_state_.runner_first, (int)pending_state_.runner_second, (int)pending_state_.runner_third);
 
-      if (state_.inning != prev.inning || state_.is_top_inning != prev.is_top_inning ||
-          state_.inning_intermission != prev.inning_intermission) {
-        if (state_.inning_intermission == InningIntermissionKind::MIDDLE) {
-          ESP_LOGI(TAG, "Inning: Mid %s", state_.inning_ordinal.c_str());
-        } else if (state_.inning_intermission == InningIntermissionKind::END) {
-          ESP_LOGI(TAG, "Inning: End %s", state_.inning_ordinal.c_str());
+      if (pending_state_.inning != prev.inning || pending_state_.is_top_inning != prev.is_top_inning ||
+          pending_state_.inning_intermission != prev.inning_intermission) {
+        if (pending_state_.inning_intermission == InningIntermissionKind::MIDDLE) {
+          ESP_LOGI(TAG, "Inning: Mid %s", pending_state_.inning_ordinal.c_str());
+        } else if (pending_state_.inning_intermission == InningIntermissionKind::END) {
+          ESP_LOGI(TAG, "Inning: End %s", pending_state_.inning_ordinal.c_str());
         } else {
           ESP_LOGI(TAG, "Inning: %s %s (%d outs)",
-                   state_.is_top_inning ? "Top" : "Bottom",
-                   state_.inning_ordinal.c_str(),
-                   state_.outs);
+                   pending_state_.is_top_inning ? "Top" : "Bottom",
+                   pending_state_.inning_ordinal.c_str(),
+                   pending_state_.outs);
         }
       }
     }
 
-    if (prev.game_pk != state_.game_pk) {
+    if (prev.game_pk != pending_state_.game_pk) {
       final_at_utc_ = 0;
     }
-    if (state_.phase == GamePhase::NONE || state_.phase == GamePhase::PREVIEW) {
+    if (pending_state_.phase == GamePhase::NONE || pending_state_.phase == GamePhase::PREVIEW) {
       final_at_utc_ = 0;
     }
-    if (prev.phase == GamePhase::LIVE && state_.phase == GamePhase::FINAL && rtc_ != nullptr) {
+    if (prev.phase == GamePhase::LIVE && pending_state_.phase == GamePhase::FINAL && rtc_ != nullptr) {
       time_t now_ts = rtc_->utcnow().timestamp;
       if (now_ts > 0) {
         final_at_utc_ = now_ts;
@@ -491,7 +491,7 @@ bool BaseballTracker::fetch_live_feed_(int game_pk) {
 }
 
 bool BaseballTracker::parse_live_feed_response_(const std::string &json_body) {
-  GameState prev = state_;
+  GameState prev = pending_state_;
 
   return json::parse_json(json_body, [this, &prev, &json_body](JsonObject root) -> bool {
     ESP_LOGV(TAG, "parse_live_feed_response_: body_len=%u  gameData=%s  liveData=%s",
@@ -510,13 +510,13 @@ bool BaseballTracker::parse_live_feed_response_(const std::string &json_body) {
       const char *abstract_state = status["abstractGameState"] | "";
       const char *detailed_state = status["detailedState"]     | "";
       if (detailed_state[0] != '\0') {
-        state_.detailed_state = detailed_state;
+        pending_state_.detailed_state = detailed_state;
       }
       if (strcmp(abstract_state, "Final") == 0) {
-        const bool became_final = (state_.phase != GamePhase::FINAL);
+        const bool became_final = (pending_state_.phase != GamePhase::FINAL);
         if (became_final) {
-          ESP_LOGI(TAG, "feed/live reports Final (gamePk=%d)", state_.game_pk);
-          state_.phase = GamePhase::FINAL;
+          ESP_LOGI(TAG, "feed/live reports Final (gamePk=%d)", pending_state_.game_pk);
+          pending_state_.phase = GamePhase::FINAL;
         }
         if (prev.phase == GamePhase::LIVE && rtc_ != nullptr) {
           time_t now_ts = rtc_->utcnow().timestamp;
@@ -531,8 +531,8 @@ bool BaseballTracker::parse_live_feed_response_(const std::string &json_body) {
     if (!teams.isNull()) {
       const char *aw = teams["away"]["abbreviation"] | "";
       const char *hm = teams["home"]["abbreviation"] | "";
-      if (aw[0] != '\0') state_.away_abbrev = aw;
-      if (hm[0] != '\0') state_.home_abbrev = hm;
+      if (aw[0] != '\0') pending_state_.away_abbrev = aw;
+      if (hm[0] != '\0') pending_state_.home_abbrev = hm;
     }
 
     std::unordered_map<int, std::string> player_last;
@@ -564,28 +564,28 @@ bool BaseballTracker::parse_live_feed_response_(const std::string &json_body) {
       return true;
     }
 
-    state_.inning         = ls["currentInning"] | state_.inning;
-    state_.inning_ordinal = ls["currentInningOrdinal"] | state_.inning_ordinal.c_str();
-    state_.is_top_inning  = ls["isTopInning"] | state_.is_top_inning;
-    state_.balls          = ls["balls"]   | 0;
-    state_.strikes        = ls["strikes"] | 0;
-    state_.outs           = ls["outs"]    | 0;
+    pending_state_.inning         = ls["currentInning"] | pending_state_.inning;
+    pending_state_.inning_ordinal = ls["currentInningOrdinal"] | pending_state_.inning_ordinal.c_str();
+    pending_state_.is_top_inning  = ls["isTopInning"] | pending_state_.is_top_inning;
+    pending_state_.balls          = ls["balls"]   | 0;
+    pending_state_.strikes        = ls["strikes"] | 0;
+    pending_state_.outs           = ls["outs"]    | 0;
 
     JsonObject ls_teams = ls["teams"];
     if (!ls_teams.isNull()) {
-      state_.away_score = ls_teams["away"]["runs"] | state_.away_score;
-      state_.home_score = ls_teams["home"]["runs"] | state_.home_score;
+      pending_state_.away_score = ls_teams["away"]["runs"] | pending_state_.away_score;
+      pending_state_.home_score = ls_teams["home"]["runs"] | pending_state_.home_score;
     }
 
     int batter_id = 0;
     JsonObject offense = ls["offense"];
     if (!offense.isNull()) {
-      state_.runner_first  = !offense["first"].isNull();
-      state_.runner_second = !offense["second"].isNull();
-      state_.runner_third  = !offense["third"].isNull();
+      pending_state_.runner_first  = !offense["first"].isNull();
+      pending_state_.runner_second = !offense["second"].isNull();
+      pending_state_.runner_third  = !offense["third"].isNull();
       batter_id = offense["batter"]["id"] | 0;
     } else {
-      state_.runner_first = state_.runner_second = state_.runner_third = false;
+      pending_state_.runner_first = pending_state_.runner_second = pending_state_.runner_third = false;
     }
 
     int pitcher_id = 0;
@@ -594,32 +594,32 @@ bool BaseballTracker::parse_live_feed_response_(const std::string &json_body) {
       pitcher_id = defense["pitcher"]["id"] | 0;
     }
 
-    state_.batter_last  = resolve_last(batter_id);
-    state_.pitcher_last = resolve_last(pitcher_id);
-    if (state_.batter_last.empty()  && batter_id  > 0)
+    pending_state_.batter_last  = resolve_last(batter_id);
+    pending_state_.pitcher_last = resolve_last(pitcher_id);
+    if (pending_state_.batter_last.empty()  && batter_id  > 0)
       ESP_LOGV(TAG, "  batter id=%d not found in player map",  batter_id);
-    if (state_.pitcher_last.empty() && pitcher_id > 0)
+    if (pending_state_.pitcher_last.empty() && pitcher_id > 0)
       ESP_LOGV(TAG, "  pitcher id=%d not found in player map", pitcher_id);
 
     const char *inning_state = ls["inningState"] | "";
     ESP_LOGV(TAG, "  live inningState='%s'", inning_state);
-    state_.inning_intermission = InningIntermissionKind::NONE;
+    pending_state_.inning_intermission = InningIntermissionKind::NONE;
     if (strcasecmp(inning_state, "Middle") == 0) {
-      state_.inning_intermission = InningIntermissionKind::MIDDLE;
+      pending_state_.inning_intermission = InningIntermissionKind::MIDDLE;
     } else if (strcasecmp(inning_state, "End") == 0) {
-      state_.inning_intermission = InningIntermissionKind::END;
+      pending_state_.inning_intermission = InningIntermissionKind::END;
     } else if (inning_state[0] != '\0') {
       ESP_LOGV(TAG, "  inningState '%s' not Middle/End, treated as active", inning_state);
     }
-    if (state_.inning_intermission != InningIntermissionKind::NONE) {
-      state_.outs = 0;
-      state_.batter_last.clear();
-      state_.runner_first = state_.runner_second = state_.runner_third = false;
+    if (pending_state_.inning_intermission != InningIntermissionKind::NONE) {
+      pending_state_.outs = 0;
+      pending_state_.batter_last.clear();
+      pending_state_.runner_first = pending_state_.runner_second = pending_state_.runner_third = false;
     }
 
-    if (state_.away_score != prev.away_score || state_.home_score != prev.home_score) {
-      ESP_LOGI(TAG, "Score update (live): %s %d, %s %d", state_.away_abbrev.c_str(), state_.away_score,
-               state_.home_abbrev.c_str(), state_.home_score);
+    if (pending_state_.away_score != prev.away_score || pending_state_.home_score != prev.home_score) {
+      ESP_LOGI(TAG, "Score update (live): %s %d, %s %d", pending_state_.away_abbrev.c_str(), pending_state_.away_score,
+               pending_state_.home_abbrev.c_str(), pending_state_.home_score);
     }
 
     JsonObject plays = live_data["plays"];
@@ -627,14 +627,14 @@ bool BaseballTracker::parse_live_feed_response_(const std::string &json_body) {
       JsonArray scoring_plays = plays["scoringPlays"];
       int sp_count = (int)scoring_plays.size();
 
-      if (state_.known_scoring_play_count >= 0 && sp_count > state_.known_scoring_play_count) {
+      if (pending_state_.known_scoring_play_count >= 0 && sp_count > pending_state_.known_scoring_play_count) {
         JsonObject cp        = plays["currentPlay"];
         const char *event    = cp["result"]["event"]       | "";
         const char *desc     = cp["result"]["description"] | "";
         const char *half     = cp["about"]["halfInning"]   | "";
 
         // "bottom" half = home team batting = home team scored; XOR with user_team_is_home
-        bool user_scored = (strcmp(half, "bottom") == 0) == state_.user_team_is_home;
+        bool user_scored = (strcmp(half, "bottom") == 0) == pending_state_.user_team_is_home;
 
         ScoringPlayType ptype = (user_scored && is_hit_event_(event))
             ? play_type_for_(event)
@@ -646,46 +646,46 @@ bool BaseballTracker::parse_live_feed_response_(const std::string &json_body) {
         } else {
           char fallback[40];
           snprintf(fallback, sizeof(fallback), "Run scored! %s %d  %s %d",
-                   state_.away_abbrev.c_str(), state_.away_score,
-                   state_.home_abbrev.c_str(), state_.home_score);
+                   pending_state_.away_abbrev.c_str(), pending_state_.away_score,
+                   pending_state_.home_abbrev.c_str(), pending_state_.home_score);
           text = fallback;
         }
 
-        if (state_.scoring_play_text.empty()) {
-          state_.scoring_play_text       = text;
-          state_.scoring_play_type       = ptype;
-          state_.scoring_play_started_ms = millis();
-          state_.scoring_play_end_ms     = 0;
+        if (pending_state_.scoring_play_text.empty()) {
+          pending_state_.scoring_play_text       = text;
+          pending_state_.scoring_play_type       = ptype;
+          pending_state_.scoring_play_started_ms = millis();
+          pending_state_.scoring_play_end_ms     = 0;
         } else {
-          state_.scoring_play_queue.push_back(text);
-          state_.scoring_play_type_queue.push_back(ptype);
+          pending_state_.scoring_play_queue.push_back(text);
+          pending_state_.scoring_play_type_queue.push_back(ptype);
         }
         ESP_LOGI(TAG, "Scoring play (type=%d): %s", (int)ptype, text.c_str());
       }
-      state_.known_scoring_play_count = sp_count;
+      pending_state_.known_scoring_play_count = sp_count;
     }
 
-    if (state_.inning != prev.inning || state_.is_top_inning != prev.is_top_inning ||
-        state_.inning_intermission != prev.inning_intermission) {
-      if (state_.inning_intermission == InningIntermissionKind::MIDDLE) {
-        ESP_LOGI(TAG, "Inning: Mid %s", state_.inning_ordinal.c_str());
-      } else if (state_.inning_intermission == InningIntermissionKind::END) {
-        ESP_LOGI(TAG, "Inning: End %s", state_.inning_ordinal.c_str());
+    if (pending_state_.inning != prev.inning || pending_state_.is_top_inning != prev.is_top_inning ||
+        pending_state_.inning_intermission != prev.inning_intermission) {
+      if (pending_state_.inning_intermission == InningIntermissionKind::MIDDLE) {
+        ESP_LOGI(TAG, "Inning: Mid %s", pending_state_.inning_ordinal.c_str());
+      } else if (pending_state_.inning_intermission == InningIntermissionKind::END) {
+        ESP_LOGI(TAG, "Inning: End %s", pending_state_.inning_ordinal.c_str());
       } else {
-        ESP_LOGI(TAG, "Inning: %s %s (%d outs)", state_.is_top_inning ? "Top" : "Bottom",
-                 state_.inning_ordinal.c_str(), state_.outs);
+        ESP_LOGI(TAG, "Inning: %s %s (%d outs)", pending_state_.is_top_inning ? "Top" : "Bottom",
+                 pending_state_.inning_ordinal.c_str(), pending_state_.outs);
       }
     }
 
     ESP_LOGD(TAG, "feed/live: %s @ %s %d-%d  %s%s  B%d S%d O%d  bases:[%s%s%s]  P:%s AB:%s",
-             state_.away_abbrev.c_str(), state_.home_abbrev.c_str(), state_.away_score, state_.home_score,
-             state_.is_top_inning ? "T" : "B", state_.inning_ordinal.c_str(),
-             state_.balls, state_.strikes, state_.outs,
-             state_.runner_first  ? "1" : "-",
-             state_.runner_second ? "2" : "-",
-             state_.runner_third  ? "3" : "-",
-             state_.pitcher_last.empty() ? "--" : state_.pitcher_last.c_str(),
-             state_.batter_last.empty()  ? "--" : state_.batter_last.c_str());
+             pending_state_.away_abbrev.c_str(), pending_state_.home_abbrev.c_str(), pending_state_.away_score, pending_state_.home_score,
+             pending_state_.is_top_inning ? "T" : "B", pending_state_.inning_ordinal.c_str(),
+             pending_state_.balls, pending_state_.strikes, pending_state_.outs,
+             pending_state_.runner_first  ? "1" : "-",
+             pending_state_.runner_second ? "2" : "-",
+             pending_state_.runner_third  ? "3" : "-",
+             pending_state_.pitcher_last.empty() ? "--" : pending_state_.pitcher_last.c_str(),
+             pending_state_.batter_last.empty()  ? "--" : pending_state_.batter_last.c_str());
 
     return true;
   });

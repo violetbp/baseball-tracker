@@ -12,6 +12,7 @@
 #include "esphome/components/binary_sensor/binary_sensor.h"
 #include "esphome/components/switch/switch.h"
 #include "esphome/components/select/select.h"
+#include "esphome/components/number/number.h"
 #include "esphome/components/time/real_time_clock.h"
 
 namespace esphome {
@@ -121,6 +122,10 @@ class BaseballTracker : public Component {
   void set_base_url_and_refresh(const std::string &url);
   const std::string &get_base_url() const { return base_url_; }
 
+  // Display delay: how many ms after a poll before the screen updates.
+  void set_display_delay_ms(uint32_t ms) { display_delay_ms_ = ms; }
+  uint32_t get_display_delay_ms() const { return display_delay_ms_; }
+
   static bool parse_iso8601_utc(const char *iso, time_t *out);
 
  protected:
@@ -203,7 +208,10 @@ class BaseballTracker : public Component {
   bool last_published_in_progress_{false};
   bool in_progress_sensor_published_{false};
 
-  GameState state_{};
+  GameState state_{};          // what draw_game() renders
+  GameState pending_state_{};  // updated immediately on every poll
+  uint32_t pending_updated_at_ms_{0};  // millis() when pending_state_ last changed; 0 = nothing pending
+  uint32_t display_delay_ms_{0};       // 0 = promote immediately
 
   // Colors – defined as inline helpers to avoid constexpr issues with Color
   static Color kWhite()  { return Color(255, 255, 255); }
@@ -274,6 +282,21 @@ class TeamSelect : public Component, public select::Select {
   static const TeamOpt *find_by_name_(const std::string &name);
   static const TeamOpt *find_by_id_(int team_id);
 
+  BaseballTracker *tracker_{nullptr};
+  bool restore_value_{false};
+  ESPPreferenceObject pref_;
+  bool pref_ready_{false};
+};
+
+class PollDelayNumber : public Component, public number::Number {
+ public:
+  void set_tracker(BaseballTracker *t) { tracker_ = t; }
+  void set_restore_value(bool v) { restore_value_ = v; }
+
+  void setup() override;
+  void control(float value) override;
+
+ protected:
   BaseballTracker *tracker_{nullptr};
   bool restore_value_{false};
   ESPPreferenceObject pref_;

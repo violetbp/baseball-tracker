@@ -1,6 +1,6 @@
 import esphome.codegen as cg
 import esphome.config_validation as cv
-from esphome.components import binary_sensor, select, switch as sw
+from esphome.components import binary_sensor, number, select, switch as sw
 from esphome.components.display import Display
 from esphome.components.font import Font
 from esphome.components.time import RealTimeClock
@@ -16,12 +16,13 @@ from esphome.const import (
 _MINIMUM_ESPHOME_VERSION = "2026.3.0"
 
 DEPENDENCIES = ["network", "display", "font", "time", "binary_sensor", "switch", "select"]
-AUTO_LOAD = ["json"]
+AUTO_LOAD = ["json", "number"]
 
 baseball_tracker_ns = cg.esphome_ns.namespace("baseball_tracker")
 BaseballTracker = baseball_tracker_ns.class_("BaseballTracker", cg.Component)
 TeamSelect = baseball_tracker_ns.class_("TeamSelect", select.Select, cg.Component)
 ServerSelect = baseball_tracker_ns.class_("ServerSelect", select.Select, cg.Component)
+PollDelayNumber = baseball_tracker_ns.class_("PollDelayNumber", number.Number, cg.Component)
 
 CONF_FONT_ID = "font_id"
 CONF_TEAM_ID = "team_id"
@@ -33,6 +34,7 @@ CONF_BASEBALL_PAGE_SWITCH = "baseball_page_switch"
 CONF_GAME_IN_PROGRESS = "game_in_progress"
 CONF_TEAM_SELECT = "team_select"
 CONF_SERVER_SELECT = "server_select"
+CONF_DELAY_NUMBER = "delay_number"
 CONF_BASE_URL = "base_url"
 
 _MARINERS_TEAM_ID = 136
@@ -112,6 +114,11 @@ CONFIG_SCHEMA = cv.All(
                     cv.Optional(CONF_RESTORE_VALUE, default=True): cv.boolean,
                 }
             ),
+            cv.Optional(CONF_DELAY_NUMBER): number.number_schema(PollDelayNumber).extend(
+                {
+                    cv.Optional(CONF_RESTORE_VALUE, default=False): cv.boolean,
+                }
+            ),
         }
     ).extend(cv.COMPONENT_SCHEMA),
 )
@@ -167,5 +174,19 @@ async def to_code(config):
         cg.add(sel.set_restore_value(sel_conf[CONF_RESTORE_VALUE]))
         await cg.register_component(sel, sel_conf)
         await select.register_select(sel, sel_conf, options=["MLB Stats API", dev_url])
+
+    if CONF_DELAY_NUMBER in config and config[CONF_DELAY_NUMBER]:
+        num_conf = config[CONF_DELAY_NUMBER]
+        num = cg.new_Pvariable(num_conf[CONF_ID])
+        cg.add(num.set_tracker(var))
+        cg.add(num.set_restore_value(num_conf[CONF_RESTORE_VALUE]))
+        await cg.register_component(num, num_conf)
+        await number.register_number(
+            num,
+            num_conf,
+            min_value=0,
+            max_value=60000,
+            step=100,
+        )
 
     await cg.register_component(var, config)

@@ -12,7 +12,7 @@ baseball_tracker:
   team_select:
     name: "MLB Team"
     restore_value: true
-  poll_interval: .2s
+  poll_interval: 5s
   font_id: pixolletta8px_edit
   # Auto: show the baseball page from 5 min before first pitch; hide after Final
   # (device clock must be NTP sync’d). Requires baseball_page_switch below.
@@ -22,4 +22,10 @@ baseball_tracker:
   baseball_page_switch: baseball_display_switch
   game_in_progress:
     name: "MLB game in progress"
+  server_select:
+    name: "MLB API Server"
+    restore_value: true
+  delay_number:
+    name: "MLB Display Delay"
+    restore_value: false
 # ──────────────────────────────────────────────────────────────────────────

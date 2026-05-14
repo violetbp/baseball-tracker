@@ -57,11 +57,12 @@ void BaseballTracker::loop() {
 
   if (need_schedule) {
     ESP_LOGD(TAG, "Polling schedule (interval=%u ms, phase=%d, first_ok=%s)",
-             schedule_interval, (int)state_.phase, first_poll_done_ ? "yes" : "no");
+             schedule_interval, (int)pending_state_.phase, first_poll_done_ ? "yes" : "no");
     bool ok = fetch_schedule_data_();
     last_schedule_poll_ms_ = now;
     if (ok) {
       first_poll_done_ = true;
+      pending_updated_at_ms_ = now;
     }
   }
 
@@ -70,16 +71,27 @@ void BaseballTracker::loop() {
       : poll_interval_ms_;
 
   bool need_live = first_poll_done_
-      && state_.phase == GamePhase::LIVE
-      && state_.game_pk > 0
+      && pending_state_.phase == GamePhase::LIVE
+      && pending_state_.game_pk > 0
       && (last_live_poll_ms_ == 0
           || (now - last_live_poll_ms_) >= live_interval);
 
   if (need_live) {
     ESP_LOGD(TAG, "Polling feed/live (interval=%u ms%s, gamePk=%d)",
-             live_interval, using_real_api_ ? " [real API]" : "", state_.game_pk);
-    fetch_live_feed_(state_.game_pk);
+             live_interval, using_real_api_ ? " [real API]" : "", pending_state_.game_pk);
+    bool ok = fetch_live_feed_(pending_state_.game_pk);
     last_live_poll_ms_ = now;
+    if (ok) {
+      pending_updated_at_ms_ = now;
+    }
+  }
+
+  // Promote pending_state_ to state_ (what draw_game renders) after the configured delay.
+  if (pending_updated_at_ms_ > 0) {
+    if (display_delay_ms_ == 0 || (now - pending_updated_at_ms_) >= display_delay_ms_) {
+      state_ = pending_state_;
+      pending_updated_at_ms_ = 0;
+    }
   }
 
   if (now - last_auto_logic_ms_ >= 1000) {
@@ -131,19 +143,22 @@ void BaseballTracker::set_team_id_and_refresh(int team_id) {
   last_schedule_poll_ms_ = now;
   if (ok) {
     first_poll_done_ = true;
-    if (state_.phase == GamePhase::LIVE && state_.game_pk > 0) {
+    if (pending_state_.phase == GamePhase::LIVE && pending_state_.game_pk > 0) {
       App.feed_wdt();
-      fetch_live_feed_(state_.game_pk);
+      fetch_live_feed_(pending_state_.game_pk);
       last_live_poll_ms_ = now;
     }
+    // Explicit team change: show the new state immediately regardless of delay.
+    state_ = pending_state_;
+    pending_updated_at_ms_ = 0;
   }
 }
 
 bool BaseballTracker::should_auto_show_baseball_() const {
-  if (state_.phase == GamePhase::NONE) {
+  if (pending_state_.phase == GamePhase::NONE) {
     return false;
   }
-  if (state_.phase == GamePhase::FINAL) {
+  if (pending_state_.phase == GamePhase::FINAL) {
     if (final_at_utc_ == 0 || rtc_ == nullptr || auto_page_post_final_sec_ == 0) {
       return false;
     }
@@ -153,18 +168,18 @@ bool BaseballTracker::should_auto_show_baseball_() const {
     }
     return now_ts < final_at_utc_ + static_cast<time_t>(auto_page_post_final_sec_);
   }
-  if (state_.phase == GamePhase::LIVE) {
+  if (pending_state_.phase == GamePhase::LIVE) {
     return true;
   }
-  if (state_.phase == GamePhase::PREVIEW) {
-    if (rtc_ == nullptr || !state_.has_game_start) {
+  if (pending_state_.phase == GamePhase::PREVIEW) {
+    if (rtc_ == nullptr || !pending_state_.has_game_start) {
       return false;
     }
     time_t now_ts = rtc_->utcnow().timestamp;
     if (now_ts < 1) {
       return false;
     }
-    time_t t0 = state_.game_start_utc - static_cast<time_t>(auto_page_lead_sec_);
+    time_t t0 = pending_state_.game_start_utc - static_cast<time_t>(auto_page_lead_sec_);
     return now_ts >= t0;
   }
   return false;
@@ -184,7 +199,7 @@ void BaseballTracker::try_auto_baseball_page_() {
   }
   if (want) {
     baseball_page_switch_->turn_on();
-    if (state_.phase == GamePhase::FINAL) {
+    if (pending_state_.phase == GamePhase::FINAL) {
       ESP_LOGI(TAG, "Auto page: show baseball (post-final score for %u s)", auto_page_post_final_sec_);
     } else {
       ESP_LOGI(TAG, "Auto page: show baseball (T−%us window / live)", auto_page_lead_sec_);
@@ -200,7 +215,7 @@ void BaseballTracker::update_game_in_progress_sensor_() {
   if (game_in_progress_sensor_ == nullptr) {
     return;
   }
-  bool live = (state_.phase == GamePhase::LIVE);
+  bool live = (pending_state_.phase == GamePhase::LIVE);
   if (in_progress_sensor_published_ && live == last_published_in_progress_) {
     return;
   }
@@ -365,6 +380,41 @@ void TeamSelect::control(const std::string &value) {
       pref_.save(&id);
     }
     tracker_->set_team_id_and_refresh(found->team_id);
+  }
+}
+
+void PollDelayNumber::setup() {
+  auto traits = number::NumberTraits();
+  traits.set_min_value(0.0f);
+  traits.set_max_value(60000.0f);
+  traits.set_step(100.0f);
+  this->traits = traits;
+
+  float initial = 0.0f;
+  if (restore_value_) {
+    pref_ = global_preferences->make_preference<uint32_t>(this->get_object_id_hash());
+    pref_ready_ = true;
+    uint32_t saved = 0;
+    if (pref_.load(&saved)) {
+      initial = static_cast<float>(saved);
+      if (tracker_ != nullptr) {
+        tracker_->set_display_delay_ms(saved);
+      }
+    }
+  } else if (tracker_ != nullptr) {
+    initial = static_cast<float>(tracker_->get_display_delay_ms());
+  }
+  this->publish_state(initial);
+}
+
+void PollDelayNumber::control(float value) {
+  this->publish_state(value);
+  uint32_t ms = static_cast<uint32_t>(value);
+  if (restore_value_ && pref_ready_) {
+    pref_.save(&ms);
+  }
+  if (tracker_ != nullptr) {
+    tracker_->set_display_delay_ms(ms);
   }
 }
 
