@@ -34,9 +34,9 @@ static bool is_hit_event_(const char *ev) {
   return false;
 }
 
-static ScoringPlayType play_type_for_(const char *ev) {
-  if (strcmp(ev, "Grand Slam") == 0) return ScoringPlayType::GRAND_SLAM;
-  if (strcmp(ev, "Home Run")   == 0) return ScoringPlayType::HOME_RUN;
+static ScoringPlayType play_type_for_(JsonObject result) { 
+  if (strcmp(result["event"], "Home Run") == 0 && result["rbi"] == 4) return ScoringPlayType::GRAND_SLAM;
+  if (strcmp(result["event"], "Home Run") == 0) return ScoringPlayType::HOME_RUN;
   return ScoringPlayType::NORMAL;
 }
 
@@ -126,6 +126,7 @@ bool http_get_json_(const std::string &base_url, const char *path, std::string *
   esp_err_t err = esp_http_client_perform(client);
   if (err != ESP_OK) {
     ESP_LOGW(log_tag, "HTTP perform failed: %s", esp_err_to_name(err));
+    esp_http_client_close(client);
     esp_http_client_cleanup(client);
     return false;
   }
@@ -135,12 +136,14 @@ bool http_get_json_(const std::string &base_url, const char *path, std::string *
 
   if (status_code != 200) {
     ESP_LOGW(log_tag, "HTTP GET failed after %u ms: code=%d (url=%s)", elapsed, status_code, url.c_str());
+    esp_http_client_close(client);
     esp_http_client_cleanup(client);
     return false;
   }
 
   ESP_LOGD(log_tag, "HTTP 200 in %u ms, body=%u bytes", elapsed, (unsigned) out->size());
   ESP_LOGV(log_tag, "Response body first 200: %.200s", out->c_str());
+  esp_http_client_close(client);
   esp_http_client_cleanup(client);
   return true;
 }
@@ -160,6 +163,7 @@ bool BaseballTracker::fetch_with_fallback_(const char *path, std::string *out) {
   }
   ESP_LOGW(TAG, "Custom server unreachable, falling back to MLB Stats API");
   out->clear();
+  delay(50);  // brief yield so LwIP can finish tearing down the previous socket
   if (http_get_json_(kMlbBaseUrl, path, out, TAG)) {
     using_real_api_ = true;
     return true;
@@ -629,6 +633,7 @@ bool BaseballTracker::parse_live_feed_response_(const std::string &json_body) {
 
       if (pending_state_.known_scoring_play_count >= 0 && sp_count > pending_state_.known_scoring_play_count) {
         JsonObject cp        = plays["currentPlay"];
+        JsonObject result    = cp["result"] ;
         const char *event    = cp["result"]["event"]       | "";
         const char *desc     = cp["result"]["description"] | "";
         const char *half     = cp["about"]["halfInning"]   | "";
@@ -637,7 +642,7 @@ bool BaseballTracker::parse_live_feed_response_(const std::string &json_body) {
         bool user_scored = (strcmp(half, "bottom") == 0) == pending_state_.user_team_is_home;
 
         ScoringPlayType ptype = (user_scored && is_hit_event_(event))
-            ? play_type_for_(event)
+            ? play_type_for_(result)
             : ScoringPlayType::NORMAL;
 
         std::string text;
@@ -661,6 +666,11 @@ bool BaseballTracker::parse_live_feed_response_(const std::string &json_body) {
           pending_state_.scoring_play_type_queue.push_back(ptype);
         }
         ESP_LOGI(TAG, "Scoring play (type=%d): %s", (int)ptype, text.c_str());
+
+        if (ptype == ScoringPlayType::HOME_RUN || ptype == ScoringPlayType::GRAND_SLAM) {
+          for (auto *t : home_run_triggers_)
+            t->trigger();
+        }
       }
       pending_state_.known_scoring_play_count = sp_count;
     }

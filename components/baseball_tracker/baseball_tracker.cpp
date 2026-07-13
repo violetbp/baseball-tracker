@@ -89,8 +89,40 @@ void BaseballTracker::loop() {
   // Promote pending_state_ to state_ (what draw_game renders) after the configured delay.
   if (pending_updated_at_ms_ > 0) {
     if (display_delay_ms_ == 0 || (now - pending_updated_at_ms_) >= display_delay_ms_) {
+      // Preserve active scoring-play animation across promotion: pending_state_ is
+      // never touched by draw_ui's queue-draining, so it must be advanced here too,
+      // otherwise every promotion resurrects the already-shown play from pending
+      // with a stale timestamp, which immediately "expires" and re-triggers its
+      // spectacle/scroll — an infinite replay loop instead of settling on the live view.
+      std::string old_sp      = state_.scoring_play_text;
+      uint32_t    old_started = state_.scoring_play_started_ms;
+      uint32_t    old_end     = state_.scoring_play_end_ms;
+
+      // Detect when we've just finished showing a play: text was cleared by draw_ui
+      // but end_ms was computed (non-zero). Advance pending_state_'s own queue to match.
+      bool just_finished = old_sp.empty() && old_end != 0;
+      if (just_finished) {
+        scoring_plays_shown_ = pending_state_.known_scoring_play_count;
+        if (!pending_state_.scoring_play_queue.empty()) {
+          pending_state_.scoring_play_text = pending_state_.scoring_play_queue.front();
+          pending_state_.scoring_play_type = pending_state_.scoring_play_type_queue.front();
+          pending_state_.scoring_play_queue.erase(pending_state_.scoring_play_queue.begin());
+          pending_state_.scoring_play_type_queue.erase(pending_state_.scoring_play_type_queue.begin());
+          pending_state_.scoring_play_started_ms = now;
+        } else {
+          pending_state_.scoring_play_text.clear();
+        }
+        pending_state_.scoring_play_end_ms = 0;
+      }
+
       state_ = pending_state_;
       pending_updated_at_ms_ = 0;
+
+      if (!old_sp.empty() && state_.scoring_play_text == old_sp) {
+        // Same play still mid-scroll: preserve timing so it doesn't restart.
+        state_.scoring_play_started_ms = old_started;
+        state_.scoring_play_end_ms     = old_end;
+      }
     }
   }
 
@@ -104,7 +136,7 @@ void BaseballTracker::loop() {
 void BaseballTracker::dump_config() {
   ESP_LOGCONFIG(TAG, "Baseball Tracker:");
   ESP_LOGCONFIG(TAG, "  Team ID: %d", team_id_);
-  ESP_LOGCONFIG(TAG, "  Poll interval: %u ms", poll_interval_ms_);
+  ESP_LOGCONFIG(TAG, "  Poll interval: %u s", poll_interval_ms_ / 1000);
   ESP_LOGCONFIG(TAG, "  Auto baseball page: %s", auto_baseball_page_ ? "yes" : "no");
   ESP_LOGCONFIG(TAG, "  Auto lead before start: %u s", auto_page_lead_sec_);
   ESP_LOGCONFIG(TAG, "  Post-final auto-show: %u s", auto_page_post_final_sec_);
@@ -380,6 +412,41 @@ void TeamSelect::control(const std::string &value) {
       pref_.save(&id);
     }
     tracker_->set_team_id_and_refresh(found->team_id);
+  }
+}
+
+void PollIntervalNumber::setup() {
+  auto traits = number::NumberTraits();
+  traits.set_min_value(1.0f);
+  traits.set_max_value(60.0f);
+  traits.set_step(1.0f);
+  this->traits = traits;
+
+  float initial_s = 5.0f;
+  if (restore_value_) {
+    pref_ = global_preferences->make_preference<uint32_t>(this->get_object_id_hash());
+    pref_ready_ = true;
+    uint32_t saved_s = 0;
+    if (pref_.load(&saved_s) && saved_s >= 1 && saved_s <= 60) {
+      initial_s = static_cast<float>(saved_s);
+      if (tracker_ != nullptr) {
+        tracker_->set_poll_interval(saved_s * 1000);
+      }
+    }
+  } else if (tracker_ != nullptr) {
+    initial_s = static_cast<float>(tracker_->get_poll_interval_ms() / 1000);
+  }
+  this->publish_state(initial_s);
+}
+
+void PollIntervalNumber::control(float value) {
+  this->publish_state(value);
+  uint32_t s = static_cast<uint32_t>(value);
+  if (restore_value_ && pref_ready_) {
+    pref_.save(&s);
+  }
+  if (tracker_ != nullptr) {
+    tracker_->set_poll_interval(s * 1000);
   }
 }
 

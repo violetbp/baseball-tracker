@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#include "esphome/core/automation.h"
 #include "esphome/core/component.h"
 #include "esphome/core/color.h"
 #include "esphome/core/preferences.h"
@@ -28,6 +29,8 @@ enum class GamePhase {
 
 enum class ScoringPlayType { NORMAL, HOME_RUN, GRAND_SLAM };
 
+class HomeRunTrigger : public Trigger<> {};
+
 /// linescore.inningState when not actively Top/Bottom (MLB sends "Middle", "End", etc.)
 enum class InningIntermissionKind {
   NONE,
@@ -47,7 +50,7 @@ struct GameState {
   int inning{0};
   bool is_top_inning{true};
   InningIntermissionKind inning_intermission{InningIntermissionKind::NONE};
-  std::string inning_ordinal;  // "1st", "2nd", etc.
+  std::string inning_ordinal;  // "1st", "2nd", etc.  
 
   // Count (only valid when Live)
   int balls{0};
@@ -103,20 +106,23 @@ class BaseballTracker : public Component {
   int get_team_id() const { return team_id_; }
 
   // Setters called from generated code
-  void set_display(display::Display *display) { display_ = display; }
-  void set_font(font::Font *font) { font_ = font; }
-  void set_rtc(time::RealTimeClock *rtc) { rtc_ = rtc; }
-  void set_team_id(int team_id) { team_id_ = team_id; }
-  void set_poll_interval(uint32_t interval_ms) { poll_interval_ms_ = interval_ms; }
-  void set_base_url(const std::string &url) { base_url_ = url; }
-  void set_auto_baseball_page(bool e) { auto_baseball_page_ = e; }
-  void set_auto_page_lead_sec(uint32_t s) { auto_page_lead_sec_ = s; }
-  void set_auto_page_post_final_sec(uint32_t s) { auto_page_post_final_sec_ = s; }
-  void set_baseball_page_switch(switch_::Switch *s) { baseball_page_switch_ = s; }
+  void set_display(display::Display *display)         { display_ = display; }
+  void set_font(font::Font *font)                     { font_ = font; }
+  void set_rtc(time::RealTimeClock *rtc)              { rtc_ = rtc; }
+  void set_team_id(int team_id)                       { team_id_ = team_id; }
+  void set_poll_interval(uint32_t interval_ms)        { poll_interval_ms_ = interval_ms; }
+  uint32_t get_poll_interval_ms() const               { return poll_interval_ms_; }
+  void set_base_url(const std::string &url)           { base_url_ = url; }
+  void set_auto_baseball_page(bool e)                 { auto_baseball_page_ = e; }
+  void set_auto_page_lead_sec(uint32_t s)             { auto_page_lead_sec_ = s; }
+  void set_auto_page_post_final_sec(uint32_t s)       { auto_page_post_final_sec_ = s; }
+  void set_baseball_page_switch(switch_::Switch *s)   { baseball_page_switch_ = s; }
   void set_game_in_progress_sensor(binary_sensor::BinarySensor *s) { game_in_progress_sensor_ = s; }
 
   // Used by the HA team select: set team id and repoll immediately.
   void set_team_id_and_refresh(int team_id);
+
+  void register_home_run_trigger(HomeRunTrigger *t) { home_run_triggers_.push_back(t); }
 
   // Used by the HA server select: switch base URL and repoll immediately.
   void set_base_url_and_refresh(const std::string &url);
@@ -205,6 +211,8 @@ class BaseballTracker : public Component {
 
   // Optional: "game in progress" = LIVE
   binary_sensor::BinarySensor *game_in_progress_sensor_{nullptr};
+
+  std::vector<HomeRunTrigger *> home_run_triggers_;
   bool last_published_in_progress_{false};
   bool in_progress_sensor_published_{false};
 
@@ -212,6 +220,7 @@ class BaseballTracker : public Component {
   GameState pending_state_{};  // updated immediately on every poll
   uint32_t pending_updated_at_ms_{0};  // millis() when pending_state_ last changed; 0 = nothing pending
   uint32_t display_delay_ms_{0};       // 0 = promote immediately
+  int      scoring_plays_shown_{0};    // how many scoring plays we've fully scrolled through
 
   // Colors – defined as inline helpers to avoid constexpr issues with Color
   static Color kWhite()  { return Color(255, 255, 255); }
@@ -219,6 +228,7 @@ class BaseballTracker : public Component {
   static Color kGreen()  { return Color(  0, 255,   0); }
   static Color kRed()    { return Color(255,   0,   0); }
   static Color kCyan()   { return Color(  0, 255, 255); }
+  static Color kBlue()   { return Color(  0,   0, 255); }
   static Color kDim()    { return Color( 80,  80,  80); }
 
   // Pixel geometry for a 128×32 display — three visual rows
@@ -282,6 +292,21 @@ class TeamSelect : public Component, public select::Select {
   static const TeamOpt *find_by_name_(const std::string &name);
   static const TeamOpt *find_by_id_(int team_id);
 
+  BaseballTracker *tracker_{nullptr};
+  bool restore_value_{false};
+  ESPPreferenceObject pref_;
+  bool pref_ready_{false};
+};
+
+class PollIntervalNumber : public Component, public number::Number {
+ public:
+  void set_tracker(BaseballTracker *t) { tracker_ = t; }
+  void set_restore_value(bool v) { restore_value_ = v; }
+
+  void setup() override;
+  void control(float value) override;
+
+ protected:
   BaseballTracker *tracker_{nullptr};
   bool restore_value_{false};
   ESPPreferenceObject pref_;

@@ -1,5 +1,6 @@
 import esphome.codegen as cg
 import esphome.config_validation as cv
+from esphome import automation
 from esphome.components import binary_sensor, number, select, switch as sw
 from esphome.components.display import Display
 from esphome.components.font import Font
@@ -9,8 +10,8 @@ from esphome.const import (
     CONF_DISPLAY_ID,
     CONF_RESTORE_VALUE,
     CONF_TIME_ID,
+    CONF_TRIGGER_ID,
     __version__ as ESPHOME_VERSION,
-    Framework,
 )
 
 _MINIMUM_ESPHOME_VERSION = "2026.3.0"
@@ -20,10 +21,13 @@ AUTO_LOAD = ["json", "number"]
 
 baseball_tracker_ns = cg.esphome_ns.namespace("baseball_tracker")
 BaseballTracker = baseball_tracker_ns.class_("BaseballTracker", cg.Component)
+HomeRunTrigger = baseball_tracker_ns.class_("HomeRunTrigger", automation.Trigger.template())
 TeamSelect = baseball_tracker_ns.class_("TeamSelect", select.Select, cg.Component)
 ServerSelect = baseball_tracker_ns.class_("ServerSelect", select.Select, cg.Component)
 PollDelayNumber = baseball_tracker_ns.class_("PollDelayNumber", number.Number, cg.Component)
+PollIntervalNumber = baseball_tracker_ns.class_("PollIntervalNumber", number.Number, cg.Component)
 
+CONF_ON_HOME_RUN = "on_home_run"
 CONF_FONT_ID = "font_id"
 CONF_TEAM_ID = "team_id"
 CONF_POLL_INTERVAL = "poll_interval"
@@ -35,6 +39,7 @@ CONF_GAME_IN_PROGRESS = "game_in_progress"
 CONF_TEAM_SELECT = "team_select"
 CONF_SERVER_SELECT = "server_select"
 CONF_DELAY_NUMBER = "delay_number"
+CONF_POLL_INTERVAL_NUMBER = "poll_interval_number"
 CONF_BASE_URL = "base_url"
 
 _MARINERS_TEAM_ID = 136
@@ -85,7 +90,6 @@ def validate_esphome_version(obj):
 
 CONFIG_SCHEMA = cv.All(
     validate_esphome_version,
-    cv.only_with_framework(frameworks=Framework.ARDUINO),
     cv.Schema(
         {
             cv.GenerateID(): cv.declare_id(BaseballTracker),
@@ -117,6 +121,16 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_DELAY_NUMBER): number.number_schema(PollDelayNumber).extend(
                 {
                     cv.Optional(CONF_RESTORE_VALUE, default=False): cv.boolean,
+                }
+            ),
+            cv.Optional(CONF_POLL_INTERVAL_NUMBER): number.number_schema(PollIntervalNumber).extend(
+                {
+                    cv.Optional(CONF_RESTORE_VALUE, default=True): cv.boolean,
+                }
+            ),
+            cv.Optional(CONF_ON_HOME_RUN): automation.validate_automation(
+                {
+                    cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(HomeRunTrigger),
                 }
             ),
         }
@@ -175,6 +189,20 @@ async def to_code(config):
         await cg.register_component(sel, sel_conf)
         await select.register_select(sel, sel_conf, options=["MLB Stats API", dev_url])
 
+    if CONF_POLL_INTERVAL_NUMBER in config and config[CONF_POLL_INTERVAL_NUMBER]:
+        num_conf = config[CONF_POLL_INTERVAL_NUMBER]
+        num = cg.new_Pvariable(num_conf[CONF_ID])
+        cg.add(num.set_tracker(var))
+        cg.add(num.set_restore_value(num_conf[CONF_RESTORE_VALUE]))
+        await cg.register_component(num, num_conf)
+        await number.register_number(
+            num,
+            num_conf,
+            min_value=1,
+            max_value=60,
+            step=1,
+        )
+
     if CONF_DELAY_NUMBER in config and config[CONF_DELAY_NUMBER]:
         num_conf = config[CONF_DELAY_NUMBER]
         num = cg.new_Pvariable(num_conf[CONF_ID])
@@ -188,5 +216,10 @@ async def to_code(config):
             max_value=60000,
             step=100,
         )
+
+    for conf in config.get(CONF_ON_HOME_RUN, []):
+        trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID])
+        cg.add(var.register_home_run_trigger(trigger))
+        await automation.build_automation(trigger, [], conf)
 
     await cg.register_component(var, config)
