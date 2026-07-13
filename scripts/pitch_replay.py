@@ -29,6 +29,7 @@ TUI keys:
     f           snap selection to current server cursor
     r           reset server cursor to step 0
     u           clear all skips
+    p           pause / unpause (freeze cursor; server keeps returning same state)
     q / Esc     quit
 """
 
@@ -37,6 +38,8 @@ import curses
 import json
 import logging
 import threading
+import time as _time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
@@ -49,8 +52,10 @@ parser = argparse.ArgumentParser(description="Pitch-by-pitch MLB game replay")
 parser.add_argument("game_file", help="Complete MLB feed/live JSON (e.g. fullapi_inprogress.json)")
 parser.add_argument("--port",   type=int, default=8000)
 parser.add_argument("--host",   default="0.0.0.0")
-parser.add_argument("--loop",   action="store_true", help="Restart from step 0 when game ends")
-parser.add_argument("--no-tui", action="store_true", help="Run headless without TUI")
+parser.add_argument("--loop",      action="store_true", help="Restart from step 0 when game ends")
+parser.add_argument("--no-tui",    action="store_true", help="Run headless without TUI")
+parser.add_argument("--time-mode", action="store_true", help="Advance cursor by real play timestamps instead of one-per-poll")
+parser.add_argument("--speed",     type=float, default=1.0, help="Playback speed multiplier for --time-mode (default 1.0)")
 args = parser.parse_args()
 
 # ── Load game data ────────────────────────────────────────────────────────────
@@ -123,6 +128,16 @@ def compute_runner_states(plays: list) -> list[dict]:
 
 runner_states_at_ab = compute_runner_states(all_plays)
 
+# ── Time helpers ─────────────────────────────────────────────────────────────
+
+def parse_game_time(s: str | None) -> float | None:
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return None
+
 # ── Step sequence ─────────────────────────────────────────────────────────────
 
 def make_pitch_step(ab_idx: int, ev_idx: int) -> dict:
@@ -140,8 +155,8 @@ def make_pitch_step(ab_idx: int, ev_idx: int) -> dict:
     
     desc = ev.get("details", {}).get("description", "") or ev.get("type", {}).get("description", "")
     
-    resultdesc = play["result"]["description"] if is_last_ev else ""
-
+    resultdesc  = play["result"]["description"] if is_last_ev else ""
+    is_home_run = is_last_ev and play["result"].get("event", "").lower() == "home run"
 
     return {
         "kind":           "pitch",
@@ -164,6 +179,9 @@ def make_pitch_step(ab_idx: int, ev_idx: int) -> dict:
         "current_play":   play,
         "desc":           desc,
         "resultdesc":     resultdesc,
+        "is_last_ev":     is_last_ev,
+        "is_home_run":    is_home_run,
+        "game_time":      parse_game_time(ev.get("startTime")),
     }
 
 
@@ -193,6 +211,7 @@ def make_intermission_step(ab_idx: int, inning_state: str) -> dict:
         "sp_count":      sp_count,
         "current_play":  play,
         "desc":          "half-inning break",
+        "game_time":     parse_game_time(play["playEvents"][-1].get("endTime") or play["playEvents"][-1].get("startTime")),
     }
 
 
@@ -221,6 +240,7 @@ def make_final_step(ab_idx: int) -> dict:
         "sp_count":      len(scoring_idxs),
         "current_play":  play,
         "desc":          "game over",
+        "game_time":     parse_game_time(play["playEvents"][-1].get("endTime") or play["playEvents"][-1].get("startTime")),
     }
 
 
@@ -249,10 +269,49 @@ print(f"  Total steps (with intermissions + final): {len(steps)}")
 
 cursor:  int      = 0
 skipped: set[int] = set()
+paused:  bool     = False
+
+# ── Time-mode clock ───────────────────────────────────────────────────────────
+# game_time_zero: the game-clock unix timestamp that maps to replay_epoch.
+# Advancing wall time by N seconds advances game time by N * args.speed seconds.
+
+_first_game_time = next((s["game_time"] for s in steps if s.get("game_time")), 0.0)
+game_time_zero: float = _first_game_time or 0.0
+replay_epoch:   float = _time.time()
+
+
+def _game_time_now() -> float:
+    return game_time_zero + (_time.time() - replay_epoch) * args.speed
+
+
+def _step_for_time() -> int:
+    """Return the index of the last step whose game_time <= current game clock."""
+    now = _game_time_now()
+    result = 0
+    for i, s in enumerate(steps):
+        t = s.get("game_time")
+        if t is None or t <= now:
+            result = i
+        else:
+            break
+    return result
+
+
+def time_seek(idx: int):
+    """Shift the replay clock so that step idx is 'now'."""
+    global game_time_zero, replay_epoch
+    t = steps[idx].get("game_time")
+    if t is not None:
+        game_time_zero = t
+        replay_epoch   = _time.time()
 
 
 def advance():
     global cursor
+    if paused:
+        return
+    if args.time_mode:
+        return
     if cursor >= len(steps) - 1:
         if args.loop:
             cursor = 0
@@ -304,7 +363,8 @@ def build_live_response(step: dict) -> dict:
         "defense": defense,
     }
 
-    sp_indices = [s for s in scoring_idxs if s <= step["ab_idx"]]
+    sp_threshold = step["ab_idx"] if step.get("is_last_ev", True) else step["ab_idx"] - 1
+    sp_indices = [s for s in scoring_idxs if s <= sp_threshold]
 
     return {
         "gamePk": int(GAME_PK),
@@ -378,6 +438,9 @@ MLB_API   = "https://statsapi.mlb.com"
 
 @app.get(LIVE_BASE)
 async def get_live_feed(request: Request):
+    global cursor
+    if args.time_mode:
+        cursor = _step_for_time()
     step = current_step()
     resp = build_live_response(step)
     advance()
@@ -452,43 +515,45 @@ _C_BOTH    = 5   # TUI cursor + server cursor on same row
 
 _DESC_W = 20  # fixed width for the description column
 
-def _col_header_row(width: int) -> str:
-    # Each column separated by 2 spaces, matching _step_row exactly.
-    # Away/home headers are 5 chars: abbrev(3) + 2 spaces (score digit not shown).
-    base = (" " + " idx"                        # srv(1) + idx(4)
-            + "  " + "type"                     # + kind(4)
-            + "  " + "inn"                      # + half+inning(3)
-            + "  " + "B-S-O"                    # + balls-strikes-outs(5)
-            + "  " + f"{away_abbrev}  "         # + away score col(5)
-            + "  " + f"{home_abbrev}  "         # + home score col(5)
-            + "  " + "      "                   # + skip marker(6)
-            + "  " + "description".ljust(_DESC_W)  # fixed-width description
-            + "  ")                             # sep before extended description
-    remaining = max(0, width - len(base) - 1)
-    return (base + "extended description")[:width - 1]
+def _fmt_game_time(t: float | None) -> str:
+    if t is None:
+        return "        "
+    return datetime.fromtimestamp(t, tz=timezone.utc).strftime("%H:%M:%S")
+
+def _col_header_row() -> str:
+    return (" " + " idx"
+            + "  " + "type"
+            + "  " + "inn"
+            + "  " + "B-S-O"
+            + "  " + f"{away_abbrev}  "
+            + "  " + f"{home_abbrev}  "
+            + "  " + "      "
+            + "  " + "time    "
+            + "  " + "description".ljust(_DESC_W)
+            + "  " + "extended description")
 
 
-def _step_row(i: int, s: dict, width: int) -> str:
+def _step_row(i: int, s: dict) -> str:
     kind_tag = {"pitch": "PTCH", "intermission": "MID ", "final": "END "}.get(s["kind"], "??? ")
     half     = "T" if s["is_top"] else "B"
     count    = f"{s['balls']}-{s['strikes']}-{s['outs']}"
-    away_s   = f"{away_abbrev}{s['away_score']:2d}"  # "SEA 3" — 5 chars, 1 space before digit
-    home_s   = f"{home_abbrev}{s['home_score']:2d}"  # "OAK 1" — 5 chars
+    away_s   = f"{away_abbrev}{s['away_score']:2d}"
+    home_s   = f"{home_abbrev}{s['home_score']:2d}"
     srv      = "►" if i == cursor else " "
-    skp      = "[skip]" if i in skipped else "      "  # 6 chars
+    skp      = "[skip]" if i in skipped else "      "
+    ts       = _fmt_game_time(s.get("game_time"))
     desc     = s.get("desc", "")
     rdesc    = s.get("resultdesc", "") or ""
-    base     = (f"{srv}{i:4d}"
-                f"  {kind_tag}"
-                f"  {half}{s['inning']:<2d}"
-                f"  {count}"
-                f"  {away_s}"
-                f"  {home_s}"
-                f"  {skp}"
-                f"  {desc[:_DESC_W]:<{_DESC_W}}"
-                f"  ")
-    remaining = max(0, width - len(base) - 1)
-    return base + rdesc[:remaining]
+    return (f"{srv}{i:4d}"
+            f"  {kind_tag}"
+            f"  {half}{s['inning']:<2d}"
+            f"  {count}"
+            f"  {away_s}"
+            f"  {home_s}"
+            f"  {skp}"
+            f"  {ts}"
+            f"  {desc[:_DESC_W]:<{_DESC_W}}"
+            f"  {rdesc}")
 
 
 def run_tui(stdscr):
@@ -506,10 +571,11 @@ def run_tui(stdscr):
 
     stdscr.timeout(200)   # refresh at most 5×/sec to track server cursor movement
 
-    sel      = cursor
-    view_top = 0
+    sel       = cursor
+    view_top  = 0
+    view_left = 0
 
-    HELP = " j/k:move  Spc:skip  Enter:jump  f:follow  r:reset  u:unskip-all  q:quit "
+    HELP = " j/k:move  h/l/Shift+scroll:hscroll  Spc:skip  Enter:jump  f:follow  r:reset  u:unskip-all  p:pause  q:quit "
 
     while True:
         h, w = stdscr.getmaxyx()
@@ -521,16 +587,26 @@ def run_tui(stdscr):
         elif sel >= view_top + list_h:
             view_top = sel - list_h + 1
 
+        hr = steps[cursor].get("is_home_run", False)
+        stdscr.bkgd(' ', curses.A_REVERSE if hr else curses.A_NORMAL)
         stdscr.erase()
 
+        # In time-mode, keep cursor in sync with the clock
+        if args.time_mode and not paused:
+            cursor = _step_for_time()
+
         # Header
+        mode_tag = f"  [TIME {args.speed}x]" if args.time_mode else ""
+        pause_tag = "  [PAUSED]" if paused else ""
         hdr = (f" {away_abbrev} @ {home_abbrev}  gamePk={GAME_PK}"
                f"  step {cursor}/{len(steps)-1}"
-               f"  skipped:{len(skipped)} ")
+               f"  skipped:{len(skipped)}"
+               f"{mode_tag}{pause_tag} ")
         stdscr.addnstr(0, 0, hdr.ljust(w), w, curses.color_pair(_C_HEADER) | curses.A_BOLD)
 
         # Column headers
-        stdscr.addnstr(1, 0, _col_header_row(w).ljust(w - 1), w - 1,
+        col_hdr = _col_header_row()[view_left:view_left + w - 1]
+        stdscr.addnstr(1, 0, col_hdr.ljust(w - 1), w - 1,
                        curses.A_UNDERLINE | curses.A_DIM)
 
         # Step list
@@ -538,7 +614,7 @@ def run_tui(stdscr):
             idx = view_top + row
             if idx >= len(steps):
                 break
-            line = _step_row(idx, steps[idx], w)
+            line = _step_row(idx, steps[idx])[view_left:view_left + w - 1]
             is_sel = (idx == sel)
             is_srv = (idx == cursor)
             is_skp = (idx in skipped)
@@ -570,6 +646,10 @@ def run_tui(stdscr):
             sel = max(0, sel - 1)
         elif key in (curses.KEY_DOWN, ord('j')):
             sel = min(len(steps) - 1, sel + 1)
+        elif key in (curses.KEY_LEFT, ord('h')):
+            view_left = max(0, view_left - 4)
+        elif key in (curses.KEY_RIGHT, ord('l')):
+            view_left += 4
         elif key == curses.KEY_PPAGE:
             sel = max(0, sel - list_h)
         elif key == curses.KEY_NPAGE:
@@ -584,21 +664,34 @@ def run_tui(stdscr):
             else:
                 skipped.add(sel)
         elif key in (curses.KEY_ENTER, 10, 13):
+            if args.time_mode:
+                time_seek(sel)
             cursor = sel
         elif key == ord('f'):
             sel = cursor
         elif key == ord('r'):
+            if args.time_mode:
+                time_seek(0)
             cursor = 0
             sel    = 0
         elif key == ord('u'):
             skipped.clear()
+        elif key == ord('p'):
+            paused = not paused
         elif key == curses.KEY_MOUSE:
             try:
                 _, _, _my, _, bstate = curses.getmouse()
+                _SHIFT = getattr(curses, 'BUTTON_SHIFT', 0x4000000)
                 if bstate & curses.BUTTON4_PRESSED:
-                    sel = max(0, sel - 3)
+                    if bstate & _SHIFT:
+                        view_left = max(0, view_left - 4)
+                    else:
+                        sel = max(0, sel - 3)
                 elif bstate & getattr(curses, "BUTTON5_PRESSED", 0x200000):
-                    sel = min(len(steps) - 1, sel + 3)
+                    if bstate & _SHIFT:
+                        view_left += 4
+                    else:
+                        sel = min(len(steps) - 1, sel + 3)
                 else:
                     row_idx = view_top + (_my - 2)
                     if 0 <= row_idx < len(steps):
