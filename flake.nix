@@ -2,7 +2,9 @@
   description = "ESPHome dev shell";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    # nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    nixpkgs.url = "nixpkgs/nixos-26.05";
+
     flake-utils.url = "github:numtide/flake-utils";
   };
 
@@ -11,22 +13,22 @@
       let
         pkgs = import nixpkgs { inherit system; };
       in {
-        devShells.default = pkgs.mkShell {
+        devShells.default = with pkgs; mkShell {
           buildInputs = [
-            pkgs.esphome
-            pkgs.platformio-core
-            pkgs.python3
-            pkgs.python3Packages.pyserial
-            pkgs.python3Packages.fastapi
-            pkgs.python3Packages.uvicorn
-            pkgs.python3Packages.httpx
-            pkgs.esptool
-            pkgs.SDL2
-            pkgs.SDL2_ttf
-            pkgs.pkg-config
-            pkgs.glib
-            pkgs.nlohmann_json
-            pkgs.curl
+            esphome
+            platformio-core
+            python3
+            python3Packages.pyserial
+            python3Packages.fastapi
+            python3Packages.uvicorn
+            python3Packages.httpx
+            esptool
+            SDL2
+            SDL2_ttf
+            pkg-config
+            glib
+            nlohmann_json
+            curl
           ];
 
           shellHook = ''
