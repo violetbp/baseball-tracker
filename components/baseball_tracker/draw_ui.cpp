@@ -42,6 +42,10 @@ void HOT BaseballTracker::draw_game() {
     case GamePhase::LIVE:    draw_live_();     break;
     case GamePhase::FINAL:   draw_final_();    break;
   }
+
+  if (!using_real_api_) {
+    display_->rectangle(0, 0, kDisplayW, kDisplayH, kBlue());
+  }
 }
 
 void BaseballTracker::draw_no_game_() {
@@ -213,17 +217,22 @@ void BaseballTracker::draw_final_() {
 void BaseballTracker::draw_spectacle_(uint32_t elapsed_ms, ScoringPlayType type) {
   auto *d = display_;
   bool flash_on = (elapsed_ms / 125) % 2 == 0;
-  Color fg = flash_on ? kYellow() : kWhite();
 
   const char *label = (type == ScoringPlayType::GRAND_SLAM) ? "GRAND SLAM!" : "HR!";
   int text_w = 0, text_h = 0, xo = 0, yo = 0;
   display_->get_text_bounds(0, 0, label, font_, display::TextAlign::TOP_LEFT, &xo, &yo, &text_w, &text_h);
   if (text_w < 0) text_w = 0;
   int label_x = (kDisplayW - text_w) / 2;
-  display_->print(label_x, kRow2Y, font_, fg, label);
 
-  if (type == ScoringPlayType::GRAND_SLAM && flash_on) {
-    d->rectangle(0, 0, kDisplayW, kDisplayH, kYellow());
+  if (type == ScoringPlayType::HOME_RUN && flash_on) {
+    d->filled_rectangle(0, 0, kDisplayW, kDisplayH, kWhite());
+    display_->print(label_x, kRow2Y, font_, Color(0, 0, 0), label);
+  } else {
+    Color fg = flash_on ? kYellow() : kWhite();
+    display_->print(label_x, kRow2Y, font_, fg, label);
+    if (type == ScoringPlayType::GRAND_SLAM && flash_on) {
+      d->rectangle(0, 0, kDisplayW, kDisplayH, kYellow());
+    }
   }
 }
 
